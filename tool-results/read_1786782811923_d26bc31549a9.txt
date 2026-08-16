@@ -1,0 +1,1107 @@
+     1→import * as d3 from "d3";
+     2→import { Selection } from "d3-selection";
+     3→
+     4→import {
+     5→    ParetoDataPoint,
+     6→    ParetoViewModel,
+     7→} from "./interfaces";
+     8→import { ResolvedSettings } from "./settings";
+     9→import {
+    10→    formatPercentage,
+    11→    formatValue,
+    12→} from "./durationFormatter";
+    13→import { containsRtl } from "./rtl";
+    14→
+    15→type SVGSel = Selection<SVGSVGElement, unknown, null, undefined>;
+    16→type GroupSel = Selection<SVGGElement, unknown, null, undefined>;
+    17→
+    18→/** Monotonic counter for unique clip-path IDs (NOT Math.random — predictable). */
+    19→let clipIdCounter = 0;
+    20→function nextClipId(prefix: string): string {
+    21→    clipIdCounter += 1;
+    22→    return `${prefix}-${clipIdCounter}`;
+    23→}
+    24→
+    25→/** Shared canvas for measureText — created lazily, reused. */
+    26→let measureCanvas: HTMLCanvasElement | null = null;
+    27→function getMeasureCanvas(): HTMLCanvasElement {
+    28→    if (!measureCanvas) {
+    29→        measureCanvas = document.createElement("canvas");
+    30→        const ctx = measureCanvas.getContext("2d");
+    31→        if (ctx) {
+    32→            ctx.font = "11px 'Segoe UI', sans-serif";
+    33→        }
+    34→    }
+    35→    return measureCanvas;
+    36→}
+    37→
+    38→/** Measure pixel width of a text string with given font. */
+    39→function measureTextWidth(
+    40→    text: string,
+    41→    fontFamily: string,
+    42→    fontSize: number,
+    43→    bold: boolean
+    44→): number {
+    45→    const canvas = getMeasureCanvas();
+    46→    const ctx = canvas.getContext("2d");
+    47→    if (!ctx) return text.length * fontSize * 0.55;
+    48→    ctx.font = `${bold ? "bold " : ""}${fontSize}px '${fontFamily}', sans-serif`;
+    49→    return ctx.measureText(text).width;
+    50→}
+    51→
+    52→/** Convert "#RRGGBB" to its rgb triplet for interpolation. */
+    53→function hexToRgb(hex: string): [number, number, number] {
+    54→    let h = hex.replace("#", "").trim();
+    55→    if (h.length === 3) {
+    56→        h = h
+    57→            .split("")
+    58→            .map((c) => c + c)
+    59→            .join("");
+    60→    }
+    61→    const n = parseInt(h, 16);
+    62→    if (isNaN(n)) return [0, 0, 0];
+    63→    return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+    64→}
+    65→
+    66→function rgbToHex(r: number, g: number, b: number): string {
+    67→    const h = (v: number) =>
+    68→        Math.max(0, Math.min(255, Math.round(v)))
+    69→            .toString(16)
+    70→            .padStart(2, "0");
+    71→    return `#${h(r)}${h(g)}${h(b)}`;
+    72→}
+    73→
+    74→/**
+    75→ * Multi-stop gradient interpolation: given N colors, return the interpolated
+    76→ * color at position `t` (0..1). Used to color bars by Pareto rank.
+    77→ */
+    78→function interpolateGradient(
+    79→    colors: string[],
+    80→    t: number
+    81→): string {
+    82→    if (colors.length === 0) return "#1F77B4";
+    83→    if (colors.length === 1) return colors[0];
+    84→    const clamped = Math.max(0, Math.min(1, t));
+    85→    const segments = colors.length - 1;
+    86→    const scaled = clamped * segments;
+    87→    const idx = Math.min(segments - 1, Math.floor(scaled));
+    88→    const localT = scaled - idx;
+    89→    const c1 = hexToRgb(colors[idx]);
+    90→    const c2 = hexToRgb(colors[idx + 1]);
+    91→    return rgbToHex(
+    92→        c1[0] + (c2[0] - c1[0]) * localT,
+    93→        c1[1] + (c2[1] - c1[1]) * localT,
+    94→        c1[2] + (c2[2] - c1[2]) * localT
+    95→    );
+    96→}
+    97→
+    98→/**
+    99→ * FIX #1: Selected bar keeps its original color.
+   100→ *
+   101→ * Resolve the fill color of a bar EXACTLY as if it were not selected.
+   102→ * - Default mode: settings.bars.defaultColor
+   103→ * - Single mode: settings.bars.singleColor
+   104→ * - Gradient mode: interpolated across categories by rank
+   105→ * - Category mode: leaves it up to the caller (we fall back to default)
+   106→ */
+   107→function resolveBarColor(
+   108→    point: ParetoDataPoint,
+   109→    settings: ResolvedSettings,
+   110→    totalPoints: number
+   111→): string {
+   112→    const mode = settings.bars.colorMode;
+   113→    switch (mode) {
+   114→        case "Single":
+   115→            return settings.bars.singleColor;
+   116→        case "Gradient": {
+   117→            const colors = settings.bars.gradientColors;
+   118→            if (colors.length === 0) return settings.bars.defaultColor;
+   119→            // Position by rank: t=0 for the first bar, t=1 for the last.
+   120→            const t =
+   121→                totalPoints > 1 ? (point.rank - 1) / (totalPoints - 1) : 0;
+   122→            return interpolateGradient(colors, t);
+   123→        }
+   124→        case "Category":
+   125→            // Category-based coloring isn't persisted across renders here;
+   126→            // we fall back to the default color (consistent v3.0 behavior).
+   127→            return settings.bars.defaultColor;
+   128→        case "Default":
+   129→        default:
+   130→            return settings.bars.defaultColor;
+   131→    }
+   132→}
+   133→
+   134→/**
+   135→ * FIX #1: Selected bar opacity.
+   136→ *
+   137→ * - Selected: base opacity (settings.bars.opacity / 100). NOT 1.0 — the bar
+   138→ *   looks exactly like an unselected bar.
+   139→ * - Dimmed (unselected in a selection state): fixed 0.3.
+   140→ * - Highlighted (cross-filter): if hasHighlight && !isHighlighted → 0.3.
+   141→ * - Otherwise: base opacity.
+   142→ */
+   143→function resolveBarOpacity(
+   144→    point: ParetoDataPoint,
+   145→    settings: ResolvedSettings,
+   146→    hasHighlight: boolean
+   147→): number {
+   148→    const base = settings.bars.opacity / 100;
+   149→    if (point.isSelected) return base;
+   150→    if (point.isDimmed) return 0.3;
+   151→    if (hasHighlight && !point.isHighlighted) return 0.3;
+   152→    return base;
+   153→}
+   154→
+   155→/** Build the dash-array for a given line style + width. */
+   156→function dashArray(style: "Solid" | "Dashed" | "Dotted", width: number): string {
+   157→    switch (style) {
+   158→        case "Dashed":
+   159→            return `${width * 3},${width * 2}`;
+   160→        case "Dotted":
+   161→            return `${width},${width}`;
+   162→        case "Solid":
+   163→        default:
+   164→            return "none";
+   165→    }
+   166→}
+   167→
+   168→/** Word-wrap a label into at most `maxLines` lines that each fit maxWidth. */
+   169→function wrapLabel(
+   170→    text: string,
+   171→    maxWidth: number,
+   172→    maxLines: number,
+   173→    fontFamily: string,
+   174→    fontSize: number,
+   175→    bold: boolean
+   176→): string[] {
+   177→    if (!text) return [];
+   178→    if (maxWidth <= 0) return [text];
+   179→    const words = String(text).split(/\s+/).filter((w) => w.length > 0);
+   180→    if (words.length === 0) return [];
+   181→    const lines: string[] = [];
+   182→    let current = words[0];
+   183→    for (let i = 1; i < words.length; i++) {
+   184→        const candidate = `${current} ${words[i]}`;
+   185→        const w = measureTextWidth(candidate, fontFamily, fontSize, bold);
+   186→        if (w <= maxWidth) {
+   187→            current = candidate;
+   188→        } else {
+   189→            lines.push(current);
+   190→            current = words[i];
+   191→            if (lines.length >= maxLines - 1) {
+   192→                // Last line: append the rest, truncated with ellipsis if needed.
+   193→                const rest = [current].concat(words.slice(i + 1)).join(" ");
+   194→                let final = rest;
+   195→                while (
+   196→                    final.length > 1 &&
+   197→                    measureTextWidth(final + "…", fontFamily, fontSize, bold) >
+   198→                        maxWidth
+   199→                ) {
+   200→                    final = final.slice(0, -1);
+   201→                }
+   202→                if (final.length < rest.length) final = final + "…";
+   203→                lines.push(final);
+   204→                return lines.slice(0, maxLines);
+   205→            }
+   206→        }
+   207→    }
+   208→    lines.push(current);
+   209→    return lines.slice(0, maxLines);
+   210→}
+   211→
+   212→/** Format a value as a percentage with the requested decimals. */
+   213→function formatPercent(value: number, decimals: number): string {
+   214→    return formatPercentage(value, decimals);
+   215→}
+   216→
+   217→/** Format an axis tick value according to the chosen DurationFormat. */
+   218→function formatAxisValue(
+   219→    value: number,
+   220→    format: string,
+   221→    isDuration: boolean
+   222→): string {
+   223→    return formatValue(value, format as any, isDuration);
+   224→}
+   225→
+   226→/**
+   227→ * Compute the effective max lines for word-wrap given the mode.
+   228→ * "Auto" → effectively unlimited (passes 100), bottom padding uses the actual
+   229→ *          max lines after wrapping.
+   230→ * "Number" → use the configured maxLines value.
+   231→ */
+   232→function effectiveMaxLines(settings: ResolvedSettings): number {
+   233→    if (settings.xAxis.maxLinesMode === "Auto") return 100;
+   234→    return Math.max(1, Math.min(10, settings.xAxis.maxLines));
+   235→}
+   236→
+   237→export interface RenderOptions {
+   238→    svg: SVGSVGElement;
+   239→    model: ParetoViewModel;
+   240→    settings: ResolvedSettings;
+   241→    viewport: { width: number; height: number };
+   242→    isRtl: boolean;
+   243→    onBarClick: (
+   244→        point: ParetoDataPoint,
+   245→        ev: MouseEvent,
+   246→        barEl: SVGRectElement
+   247→    ) => void;
+   248→    onBarContextMenu: (
+   249→        point: ParetoDataPoint,
+   250→        ev: MouseEvent,
+   251→        barEl: SVGRectElement
+   252→    ) => void;
+   253→    onBackgroundClick: (ev: MouseEvent) => void;
+   254→    onBackgroundContextMenu: (ev: MouseEvent) => void;
+   255→    onBarMouseMove: (
+   256→        point: ParetoDataPoint,
+   257→        ev: MouseEvent,
+   258→        barEl: SVGRectElement
+   259→    ) => void;
+   260→    onBarMouseLeave: () => void;
+   261→}
+   262→
+   263→/** Build a class string for a bar based on its selection state. */
+   264→function barClass(point: ParetoDataPoint): string {
+   265→    const parts = ["bar"];
+   266→    if (point.isSelected) parts.push("selected");
+   267→    else if (point.isDimmed) parts.push("dimmed");
+   268→    return parts.join(" ");
+   269→}
+   270→
+   271→/**
+   272→ * Main entry point. Renders the full Pareto chart into the provided SVG.
+   273→ * Wipes all existing children first.
+   274→ */
+   275→export function renderPareto(opts: RenderOptions): void {
+   276→    const { svg, model, settings, viewport, isRtl } = opts;
+   277→    while (svg.firstChild) svg.removeChild(svg.firstChild);
+   278→
+   279→    const svgSel = d3.select(svg) as SVGSel;
+   280→    svgSel
+   281→        .attr("class", "industrial-pareto")
+   282→        .attr("width", viewport.width)
+   283→        .attr("height", viewport.height)
+   284→        .attr("viewBox", `0 0 ${viewport.width} ${viewport.height}`)
+   285→        .attr("dir", isRtl ? "rtl" : "ltr");
+   286→
+   287→    // Background
+   288→    if (settings.background.show) {
+   289→        const alpha = 1 - settings.background.transparency / 100;
+   290→        svgSel
+   291→            .append("rect")
+   292→            .attr("x", 0)
+   293→            .attr("y", 0)
+   294→            .attr("width", viewport.width)
+   295→            .attr("height", viewport.height)
+   296→            .attr("fill", settings.background.color)
+   297→            .attr("fill-opacity", alpha);
+   298→    }
+   299→
+   300→    if (!model.hasData || model.points.length === 0) {
+   301→        svgSel
+   302→            .append("text")
+   303→            .attr("x", viewport.width / 2)
+   304→            .attr("y", viewport.height / 2)
+   305→            .attr("text-anchor", "middle")
+   306→            .attr("fill", "#888")
+   307→            .style("font-family", "Segoe UI, sans-serif")
+   308→            .style("font-size", "14px")
+   309→            .text("No data to display");
+   310→        return;
+   311→    }
+   312→
+   313→    const points = model.points;
+   314→    const totalPoints = points.length;
+   315→
+   316→    /* ------------------------- Layout / padding ------------------------- */
+   317→    // Default paddings. We then EXPAND them based on axis visibility, label
+   318→    // heights, and rotated/wrapped X labels.
+   319→    const padTop = 16;
+   320→    const padRight = settings.secondaryAxis.show ? 56 : 24;
+   321→    const padLeftBase = settings.yAxis.show ? 60 : 16;
+   322→
+   323→    // Measure Y-axis tick widths to size the left padding correctly.
+   324→    const yMax = model.maxValue;
+   325→    const yTickValues = computeNiceTicks(0, yMax, 5);
+   326→    let yTickWidth = 0;
+   327→    if (settings.yAxis.show) {
+   328→        for (const v of yTickValues) {
+   329→            const lbl = formatAxisValue(
+   330→                v,
+   331→                settings.yAxis.valueFormat,
+   332→                model.looksLikeDuration
+   333→            );
+   334→            const w = measureTextWidth(
+   335→                lbl,
+   336→                settings.yAxis.fontFamily,
+   337→                settings.yAxis.fontSize,
+   338→                settings.yAxis.bold
+   339→            );
+   340→            if (w > yTickWidth) yTickWidth = w;
+   341→        }
+   342→    }
+   343→
+   344→    const padLeft = padLeftBase + yTickWidth;
+   345→
+   346→    // X-axis label height calculation depends on rotation + word-wrap mode.
+   347→    // We need a working inner width to wrap against, so compute it now.
+   348→    const innerWidth = Math.max(
+   349→        50,
+   350→        viewport.width - padLeft - padRight
+   351→    );
+   352→
+   353→    // Wrap X labels to determine the bottom padding.
+   354→    let maxLabelLines = 1;
+   355→    let xLabelHeight = settings.xAxis.fontSize + 8;
+   356→    if (settings.xAxis.show) {
+   357→        const rotation = settings.xAxis.textRotation;
+   358→        const fontFamily = settings.xAxis.fontFamily;
+   359→        const fontSize = settings.xAxis.fontSize;
+   360→        const bold = settings.xAxis.bold;
+   361→        if (rotation === "Rotation0" && settings.xAxis.wordWrap) {
+   362→            const maxLinesCfg = effectiveMaxLines(settings);
+   363→            const maxLabelWidth = Math.max(
+   364→                20,
+   365→                innerWidth / totalPoints - 4
+   366→            );
+   367→            for (const p of points) {
+   368→                const lines = wrapLabel(
+   369→                    p.category,
+   370→                    maxLabelWidth,
+   371→                    maxLinesCfg,
+   372→                    fontFamily,
+   373→                    fontSize,
+   374→                    bold
+   375→                );
+   376→                if (lines.length > maxLabelLines) maxLabelLines = lines.length;
+   377→            }
+   378→            xLabelHeight = maxLabelLines * (fontSize + 2) + 8;
+   379→        } else if (rotation === "Rotation0") {
+   380→            // Word wrap off — labels may be thinned (existing v3.0 behavior).
+   381→            xLabelHeight = fontSize + 8;
+   382→        } else if (rotation === "Rotation45") {
+   383→            // Estimate height from longest label length (rotated 45°).
+   384→            let longest = 0;
+   385→            for (const p of points) {
+   386→                const w = measureTextWidth(
+   387→                    p.category,
+   388→                    fontFamily,
+   389→                    fontSize,
+   390→                    bold
+   391→                );
+   392→                if (w > longest) longest = w;
+   393→            }
+   394→            xLabelHeight = longest * 0.707 + 8;
+   395→        } else {
+   396→            // Rotation90 — full height of the longest label.
+   397→            let longest = 0;
+   398→            for (const p of points) {
+   399→                const w = measureTextWidth(
+   400→                    p.category,
+   401→                    fontFamily,
+   402→                    fontSize,
+   403→                    bold
+   404→                );
+   405→                if (w > longest) longest = w;
+   406→            }
+   407→            xLabelHeight = longest + 8;
+   408→        }
+   409→    }
+   410→
+   411→    const padBottom = (settings.xAxis.show ? xLabelHeight : 16) + 12;
+   412→    const innerHeight = Math.max(
+   413→        40,
+   414→        viewport.height - padTop - padBottom
+   415→    );
+   416→
+   417→    /* ----------------------------- Clip paths --------------------------- */
+   418→    const plotClipId = nextClipId("plotClip");
+   419→    const defs = svgSel.append("defs");
+   420→    defs.append("clipPath")
+   421→        .attr("id", plotClipId)
+   422→        .append("rect")
+   423→        .attr("x", 0)
+   424→        .attr("y", 0)
+   425→        .attr("width", innerWidth)
+   426→        .attr("height", innerHeight);
+   427→
+   428→    /* --------------------------- Root groups ---------------------------- */
+   429→    // Plot group is clipped (so bars/curve don't spill into axes).
+   430→    // Axes group is NOT clipped (so labels can extend slightly).
+   431→    const plotGroup = svgSel
+   432→        .append("g")
+   433→        .attr(
+   434→            "transform",
+   435→            `translate(${padLeft},${padTop})`
+   436→        )
+   437→        .attr("clip-path", `url(#${plotClipId})`);
+   438→
+   439→    const axesGroup = svgSel
+   440→        .append("g")
+   441→        .attr("transform", `translate(${padLeft},${padTop})`);
+   442→
+   443→    /* ------------------------------ Scales ------------------------------ */
+   444→    // Bars on X use ScaleBand with configurable gap.
+   445→    const gapFraction = Math.max(0, Math.min(0.9, settings.bars.barGap / 100));
+   446→    const xScale = d3
+   447→        .scaleBand<string>()
+   448→        .domain(points.map((p) => p.category))
+   449→        .range(isRtl ? [innerWidth, 0] : [0, innerWidth])
+   450→        .padding(gapFraction);
+   451→
+   452→    // Y axis: linear, value domain.
+   453→    const yScale = d3
+   454→        .scaleLinear<number, number>()
+   455→        .domain([0, yMax * 1.05 || 1])
+   456→        .range([innerHeight, 0]);
+   457→
+   458→    // Y2 axis: cumulative percentage (0..100, or user-configured min/max).
+   459→    const y2Min = settings.secondaryAxis.min;
+   460→    const y2Max = settings.secondaryAxis.max;
+   461→    const y2Scale = d3
+   462→        .scaleLinear<number, number>()
+   463→        .domain([y2Min, y2Max])
+   464→        .range([innerHeight, 0]);
+   465→
+   466→    /* ------------------------------ Grid lines -------------------------- */
+   467→    const gridGroup = plotGroup.append("g").attr("class", "grid");
+   468→    gridGroup
+   469→        .selectAll("line.grid-y")
+   470→        .data(yTickValues)
+   471→        .enter()
+   472→        .append("line")
+   473→        .attr("class", "grid-y")
+   474→        .attr("x1", 0)
+   475→        .attr("x2", innerWidth)
+   476→        .attr("y1", (d) => yScale(d))
+   477→        .attr("y2", (d) => yScale(d));
+   478→
+   479→    /* ------------------------------ Bars -------------------------------- */
+   480→    const barsGroup = plotGroup.append("g").attr("class", "bars");
+   481→    const barSel = barsGroup
+   482→        .selectAll<SVGRectElement, ParetoDataPoint>("rect.bar")
+   483→        .data(points)
+   484→        .enter()
+   485→        .append("rect")
+   486→        .attr("class", (d) => barClass(d))
+   487→        .attr(
+   488→            "x",
+   489→            (d) => (xScale(d.category) as number) + xScale.bandwidth() * 0
+   490→        )
+   491→        .attr("y", (d) => {
+   492→            // Use highlightedValue when present, otherwise rawValue.
+   493→            const v = d.isHighlighted && d.highlightedValue != null
+   494→                ? d.highlightedValue
+   495→                : d.rawValue;
+   496→            return yScale(Math.max(0, v));
+   497→        })
+   498→        .attr("width", xScale.bandwidth())
+   499→        .attr("height", (d) => {
+   500→            const v = d.isHighlighted && d.highlightedValue != null
+   501→                ? d.highlightedValue
+   502→                : d.rawValue;
+   503→            const y = yScale(Math.max(0, v));
+   504→            return Math.max(0, innerHeight - y);
+   505→        })
+   506→        .attr("fill", (d) => resolveBarColor(d, settings, totalPoints))
+   507→        .attr("fill-opacity", (d) =>
+   508→            resolveBarOpacity(d, settings, model.hasHighlight)
+   509→        )
+   510→        .style("cursor", "pointer");
+   511→
+   512→    // Wire bar events. The visual owns the handlers so it can dispatch
+   513→    // to its selection manager / tooltip service.
+   514→    barSel.each(function (point) {
+   515→        const barEl = this as SVGRectElement;
+   516→        barEl.addEventListener("click", (ev) => {
+   517→            opts.onBarClick(point, ev as MouseEvent, barEl);
+   518→        });
+   519→        barEl.addEventListener("contextmenu", (ev) => {
+   520→            opts.onBarContextMenu(point, ev as MouseEvent, barEl);
+   521→        });
+   522→        barEl.addEventListener("mousemove", (ev) => {
+   523→            opts.onBarMouseMove(point, ev as MouseEvent, barEl);
+   524→        });
+   525→        barEl.addEventListener("mouseleave", () => {
+   526→            opts.onBarMouseLeave();
+   527→        });
+   528→    });
+   529→
+   530→    /* -------------------------- Bar data labels ------------------------- */
+   531→    if (settings.barDataLabels.show) {
+   532→        const dl = settings.barDataLabels;
+   533→        const labelGroup = plotGroup
+   534→            .append("g")
+   535→            .attr("class", "bar-labels")
+   536→            .style("pointer-events", "none");
+   537→        const labelSel = labelGroup
+   538→            .selectAll<SVGTextElement, ParetoDataPoint>("text.bar-label")
+   539→            .data(points)
+   540→            .enter()
+   541→            .append("text")
+   542→            .attr("class", "bar-label")
+   543→            .attr("font-family", dl.fontFamily)
+   544→            .attr("font-size", dl.fontSize)
+   545→            .attr("font-weight", dl.bold ? "bold" : "normal")
+   546→            .attr("font-style", dl.italic ? "italic" : "normal")
+   547→            .attr("text-decoration", dl.underline ? "underline" : "none")
+   548→            .attr("fill", dl.color);
+   549→
+   550→        labelSel.each(function (point) {
+   551→            const txt = this as SVGTextElement;
+   552→            const v =
+   553→                point.isHighlighted && point.highlightedValue != null
+   554→                    ? point.highlightedValue
+   555→                    : point.rawValue;
+   556→            const text = formatAxisValue(v, dl.format, model.looksLikeDuration);
+   557→            const bandX = xScale(point.category) as number;
+   558→            const bandW = xScale.bandwidth();
+   559→            const y0 = yScale(Math.max(0, v));
+   560→            let labelX: number;
+   561→            let labelY: number;
+   562→            let anchor: "start" | "middle" | "end";
+   563→            switch (dl.position) {
+   564→                case "Above":
+   565→                    labelX = bandX + bandW / 2;
+   566→                    labelY = y0 - 6;
+   567→                    anchor = "middle";
+   568→                    break;
+   569→                case "Below":
+   570→                    labelX = bandX + bandW / 2;
+   571→                    labelY = y0 + dl.fontSize + 2;
+   572→                    anchor = "middle";
+   573→                    break;
+   574→                case "InsideEnd":
+   575→                    labelX = bandX + bandW / 2;
+   576→                    labelY = y0 + dl.fontSize;
+   577→                    anchor = "middle";
+   578→                    break;
+   579→                case "InsideBase":
+   580→                    labelX = bandX + bandW / 2;
+   581→                    labelY = innerHeight - 4;
+   582→                    anchor = "middle";
+   583→                    break;
+   584→                default:
+   585→                    labelX = bandX + bandW / 2;
+   586→                    labelY = y0 - 6;
+   587→                    anchor = "middle";
+   588→            }
+   589→            // Background rect (if enabled). Rendered as a sibling rect BEFORE
+   590→            // the text element so it sits underneath.
+   591→            if (dl.showBackground) {
+   592→                const w = measureTextWidth(
+   593→                    text,
+   594→                    dl.fontFamily,
+   595→                    dl.fontSize,
+   596→                    dl.bold
+   597→                );
+   598→                const padX = 4;
+   599→                const padY = 1;
+   600→                const bgAlpha = 1 - dl.backgroundTransparency / 100;
+   601→                const bgRect = d3
+   602→                    .select(txt.parentNode as SVGGElement)
+   603→                    .insert("rect", "text.bar-label")
+   604→                    .attr("x", labelX - w / 2 - padX)
+   605→                    .attr("y", labelY - dl.fontSize - padY)
+   606→                    .attr("width", w + padX * 2)
+   607→                    .attr("height", dl.fontSize + padY * 2)
+   608→                    .attr("fill", dl.backgroundColor)
+   609→                    .attr("fill-opacity", bgAlpha)
+   610→                    .style("pointer-events", "none");
+   611→                void bgRect; // satisfy unused-warning linters
+   612→            }
+   613→            txt.setAttribute("x", String(labelX));
+   614→            txt.setAttribute("y", String(labelY));
+   615→            txt.setAttribute("text-anchor", anchor);
+   616→            if (containsRtl(point.category)) {
+   617→                txt.setAttribute("direction", "rtl");
+   618→                txt.setAttribute("unicode-bidi", "plaintext");
+   619→                txt.classList.add("rtl-text");
+   620→            }
+   621→            txt.textContent = text;
+   622→        });
+   623→    }
+   624→
+   625→    /* ---------------------------- Cumulative line ----------------------- */
+   626→    if (settings.cumulativeLine.show) {
+   627→        const cl = settings.cumulativeLine;
+   628→        // N+1 vertices: starting point at (0, 0%) plus one vertex at the right
+   629→        // edge of each bar.
+   630→        const linePoints: Array<[number, number]> = [];
+   631→        linePoints.push([0, y2Scale(0)]);
+   632→        for (const p of points) {
+   633→            const bandX = xScale(p.category) as number;
+   634→            const bandW = xScale.bandwidth();
+   635→            const xRight = bandX + bandW;
+   636→            const y = y2Scale(p.cumulativePercentage);
+   637→            linePoints.push([xRight, y]);
+   638→        }
+   639→
+   640→        const linePath = d3
+   641→            .line<[number, number]>()
+   642→            .x((d) => d[0])
+   643→            .y((d) => d[1]);
+   644→
+   645→        const curveGroup = plotGroup.append("g").attr("class", "cumulative");
+   646→        const pathSel = curveGroup
+   647→            .append("path")
+   648→            .attr("class", "cumulative-line")
+   649→            .attr("d", linePath(linePoints) || "")
+   650→            .attr("fill", "none")
+   651→            .attr("stroke", cl.color)
+   652→            .attr("stroke-width", cl.width)
+   653→            .attr("stroke-dasharray", dashArray(cl.lineStyle, cl.width));
+   654→
+   655→        void pathSel; // (kept for future styling hooks)
+   656→
+   657→        // Markers at right edge of each bar
+   658→        if (cl.showMarkers) {
+   659→            const markerGroup = curveGroup
+   660→                .append("g")
+   661→                .attr("class", "cumulative-markers");
+   662→            for (let i = 0; i < points.length; i++) {
+   663→                const p = points[i];
+   664→                const [x, y] = linePoints[i + 1];
+   665→                const m = markerGroup
+   666→                    .append("g")
+   667→                    .attr("class", "cumulative-marker")
+   668→                    .attr("transform", `translate(${x},${y})`);
+   669→                drawMarker(
+   670→                    m,
+   671→                    cl.markerShape,
+   672→                    cl.markerSize,
+   673→                    cl.markerColor
+   674→                );
+   675→            }
+   676→        }
+   677→
+   678→        // Percentage labels (with FIX #2: font family + decimal places)
+   679→        if (cl.showLabels) {
+   680→            const labelGroup = curveGroup
+   681→                .append("g")
+   682→                .attr("class", "cumulative-labels")
+   683→                .style("pointer-events", "none");
+   684→            for (let i = 0; i < points.length; i++) {
+   685→                const p = points[i];
+   686→                const [x, y] = linePoints[i + 1];
+   687→                const labelText = formatPercent(
+   688→                    p.cumulativePercentage,
+   689→                    cl.labelDecimalPlaces
+   690→                );
+   691→                const text = labelGroup
+   692→                    .append("text")
+   693→                    .attr("class", "cumulative-label")
+   694→                    .attr("x", x)
+   695→                    .attr("y", y - cl.markerSize - 4)
+   696→                    .attr("text-anchor", "middle")
+   697→                    .attr("font-family", cl.labelFontFamily)
+   698→                    .attr("font-size", cl.labelFontSize)
+   699→                    .attr("font-weight", cl.labelBold ? "bold" : "normal")
+   700→                    .attr("font-style", cl.labelItalic ? "italic" : "normal")
+   701→                    .attr(
+   702→                        "text-decoration",
+   703→                        cl.labelUnderline ? "underline" : "none"
+   704→                    )
+   705→                    .attr("fill", cl.labelColor)
+   706→                    .text(labelText);
+   707→                if (cl.labelShowBackground) {
+   708→                    const w = measureTextWidth(
+   709→                        labelText,
+   710→                        cl.labelFontFamily,
+   711→                        cl.labelFontSize,
+   712→                        cl.labelBold
+   713→                    );
+   714→                    const padX = 4;
+   715→                    const padY = 1;
+   716→                    const bgAlpha = 1 - cl.labelBackgroundTransparency / 100;
+   717→                    labelGroup
+   718→                        .insert("rect", "text.cumulative-label")
+   719→                        .attr("x", x - w / 2 - padX)
+   720→                        .attr("y", y - cl.markerSize - 4 - cl.labelFontSize - padY)
+   721→                        .attr("width", w + padX * 2)
+   722→                        .attr("height", cl.labelFontSize + padY * 2)
+   723→                        .attr("fill", cl.labelBackgroundColor)
+   724→                        .attr("fill-opacity", bgAlpha)
+   725→                        .style("pointer-events", "none");
+   726→                }
+   727→                void text;
+   728→            }
+   729→        }
+   730→    }
+   731→
+   732→    /* ---------------------------- Reference line ------------------------ */
+   733→    if (settings.referenceLine.show) {
+   734→        const rl = settings.referenceLine;
+   735→        const refY = y2Scale(rl.value);
+   736→        const refGroup = plotGroup.append("g").attr("class", "reference");
+   737→        if (refY >= 0 && refY <= innerHeight) {
+   738→            refGroup
+   739→                .append("line")
+   740→                .attr("class", "reference-line")
+   741→                .attr("x1", 0)
+   742→                .attr("x2", innerWidth)
+   743→                .attr("y1", refY)
+   744→                .attr("y2", refY)
+   745→                .attr("stroke", rl.color)
+   746→                .attr("stroke-width", rl.width)
+   747→                .attr("stroke-dasharray", dashArray(rl.dashStyle, rl.width));
+   748→        }
+   749→        // FIX #3: Reference label anchored to RIGHT of plot, independent of Y2.
+   750→        refGroup
+   751→            .append("text")
+   752→            .attr("class", "reference-label")
+   753→            .attr("x", innerWidth - 4)
+   754→            .attr("y", Math.max(rl.labelFontSize, refY - 4))
+   755→            .attr("text-anchor", "end")
+   756→            .attr("font-family", rl.labelFontFamily)
+   757→            .attr("font-size", rl.labelFontSize)
+   758→            .attr("font-weight", rl.labelBold ? "bold" : "normal")
+   759→            .attr("fill", rl.color)
+   760→            .text(formatPercent(rl.value, 0));
+   761→    }
+   762→
+   763→    /* -------------------------------- X axis ---------------------------- */
+   764→    if (settings.xAxis.show) {
+   765→        const xa = settings.xAxis;
+   766→        const xAxisGroup = axesGroup
+   767→            .append("g")
+   768→            .attr("class", "axis x-axis")
+   769→            .attr(
+   770→                "transform",
+   771→                `translate(0,${innerHeight})`
+   772→            );
+   773→        // Axis line
+   774→        if (xa.showLine) {
+   775→            xAxisGroup
+   776→                .append("line")
+   777→                .attr("x1", 0)
+   778→                .attr("x2", innerWidth)
+   779→                .attr("y1", 0)
+   780→                .attr("y2", 0)
+   781→                .attr("stroke", xa.lineColor)
+   782→                .attr("stroke-width", xa.lineWidth);
+   783→        }
+   784→
+   785→        // Tick labels: thin according to labelDensity when wordWrap is OFF.
+   786→        const rotation = xa.textRotation;
+   787→        const density = xa.labelDensity;
+   788→        const step = computeLabelStep(totalPoints, density);
+   789→
+   790→        const labels = xAxisGroup
+   791→            .selectAll<SVGTextElement, ParetoDataPoint>("text.x-label")
+   792→            .data(points)
+   793→            .enter()
+   794→            .append("text")
+   795→            .attr("class", "x-label")
+   796→            .attr("font-family", xa.fontFamily)
+   797→            .attr("font-size", xa.fontSize)
+   798→            .attr("font-weight", xa.bold ? "bold" : "normal")
+   799→            .attr("font-style", xa.italic ? "italic" : "normal")
+   800→            .attr("text-decoration", xa.underline ? "underline" : "none")
+   801→            .attr("fill", xa.fontColor);
+   802→
+   803→        labels.each(function (point, idx) {
+   804→            const txt = this as SVGTextElement;
+   805→            const bandX = xScale(point.category) as number;
+   806→            const bandW = xScale.bandwidth();
+   807→            const cx = bandX + bandW / 2;
+   808→
+   809→            // Word-wrap path: only when rotation is 0 AND wordWrap is on.
+   810→            if (rotation === "Rotation0" && xa.wordWrap) {
+   811→                const maxLinesCfg = effectiveMaxLines(settings);
+   812→                const maxLabelWidth = Math.max(
+   813→                    20,
+   814→                    bandW + 4 // allow slight overflow into the gap
+   815→                );
+   816→                const lines = wrapLabel(
+   817→                    point.category,
+   818→                    maxLabelWidth,
+   819→                    maxLinesCfg,
+   820→                    xa.fontFamily,
+   821→                    xa.fontSize,
+   822→                    xa.bold
+   823→                );
+   824→                txt.setAttribute("x", String(cx));
+   825→                txt.setAttribute("y", String(xa.fontSize + 4));
+   826→                txt.setAttribute("text-anchor", "middle");
+   827→                if (containsRtl(point.category)) {
+   828→                    txt.setAttribute("direction", "rtl");
+   829→                    txt.setAttribute("unicode-bidi", "plaintext");
+   830→                    txt.classList.add("rtl-text");
+   831→                }
+   832→                for (let li = 0; li < lines.length; li++) {
+   833→                    const tspan = document.createElementNS(
+   834→                        "http://www.w3.org/2000/svg",
+   835→                        "tspan"
+   836→                    );
+   837→                    tspan.setAttribute("x", String(cx));
+   838→                    tspan.setAttribute(
+   839→                        "dy",
+   840→                        li === 0 ? "0" : `${xa.fontSize + 2}`
+   841→                    );
+   842→                    tspan.textContent = lines[li];
+   843→                    txt.appendChild(tspan);
+   844→                }
+   845→            } else {
+   846→                // Thin according to labelDensity when wordWrap is OFF.
+   847→                const skip =
+   848→                    !xa.wordWrap &&
+   849→                    rotation === "Rotation0" &&
+   850→                    idx % step !== 0;
+   851→                if (skip) {
+   852→                    (this as SVGTextElement).style.display = "none";
+   853→                    return;
+   854→                }
+   855→                txt.setAttribute("x", String(cx));
+   856→                txt.setAttribute("y", String(xa.fontSize + 4));
+   857→                txt.setAttribute("text-anchor", rotation === "Rotation0" ? "middle" : "end");
+   858→                if (rotation === "Rotation45") {
+   859→                    txt.setAttribute(
+   860→                        "transform",
+   861→                        `rotate(-45 ${cx} ${xa.fontSize + 4})`
+   862→                    );
+   863→                } else if (rotation === "Rotation90") {
+   864→                    txt.setAttribute(
+   865→                        "transform",
+   866→                        `rotate(-90 ${cx} ${xa.fontSize + 4})`
+   867→                    );
+   868→                }
+   869→                if (containsRtl(point.category)) {
+   870→                    txt.setAttribute("direction", "rtl");
+   871→                    txt.setAttribute("unicode-bidi", "plaintext");
+   872→                    txt.classList.add("rtl-text");
+   873→                }
+   874→                txt.textContent = point.category;
+   875→            }
+   876→        });
+   877→    }
+   878→
+   879→    /* -------------------------------- Y axis ---------------------------- */
+   880→    if (settings.yAxis.show) {
+   881→        const ya = settings.yAxis;
+   882→        const yAxisGroup = axesGroup
+   883→            .append("g")
+   884→            .attr("class", "axis y-axis");
+   885→
+   886→        if (ya.showLine) {
+   887→            yAxisGroup
+   888→                .append("line")
+   889→                .attr("x1", 0)
+   890→                .attr("x2", 0)
+   891→                .attr("y1", 0)
+   892→                .attr("y2", innerHeight)
+   893→                .attr("stroke", ya.lineColor)
+   894→                .attr("stroke-width", ya.lineWidth);
+   895→        }
+   896→
+   897→        // Tick labels
+   898→        const yLabels = yAxisGroup
+   899→            .selectAll<SVGTextElement, number>("text.y-label")
+   900→            .data(yTickValues)
+   901→            .enter()
+   902→            .append("text")
+   903→            .attr("class", "y-label")
+   904→            .attr("x", -8)
+   905→            .attr("y", (d) => yScale(d))
+   906→            .attr("dy", "0.32em")
+   907→            .attr("text-anchor", "end")
+   908→            .attr("font-family", ya.fontFamily)
+   909→            .attr("font-size", ya.fontSize)
+   910→            .attr("font-weight", ya.bold ? "bold" : "normal")
+   911→            .attr("font-style", ya.italic ? "italic" : "normal")
+   912→            .attr("text-decoration", ya.underline ? "underline" : "none")
+   913→            .attr("fill", ya.fontColor)
+   914→            .text((d) =>
+   915→                formatAxisValue(d, ya.valueFormat, model.looksLikeDuration)
+   916→            );
+   917→
+   918→        void yLabels;
+   919→
+   920→        // Axis title (rotated -90)
+   921→        if (ya.title && ya.title.length > 0) {
+   922→            axesGroup
+   923→                .append("text")
+   924→                .attr("class", "axis-title y-axis-title")
+   925→                .attr(
+   926→                    "transform",
+   927→                    `translate(${-yTickWidth - 28},${innerHeight / 2}) rotate(-90)`
+   928→                )
+   929→                .attr("text-anchor", "middle")
+   930→                .attr("font-family", ya.fontFamily)
+   931→                .attr("font-size", ya.fontSize + 1)
+   932→                .attr("font-weight", ya.bold ? "bold" : "normal")
+   933→                .attr("font-style", ya.italic ? "italic" : "normal")
+   934→                .attr("text-decoration", ya.underline ? "underline" : "none")
+   935→                .attr("fill", ya.fontColor)
+   936→                .text(ya.title);
+   937→        }
+   938→    }
+   939→
+   940→    /* --------------------------- Secondary axis ------------------------- */
+   941→    if (settings.secondaryAxis.show) {
+   942→        const sa = settings.secondaryAxis;
+   943→        const y2AxisGroup = axesGroup
+   944→            .append("g")
+   945→            .attr("class", "axis y2-axis")
+   946→            .attr("transform", `translate(${innerWidth},0)`);
+   947→
+   948→        if (sa.showLine) {
+   949→            y2AxisGroup
+   950→                .append("line")
+   951→                .attr("x1", 0)
+   952→                .attr("x2", 0)
+   953→                .attr("y1", 0)
+   954→                .attr("y2", innerHeight)
+   955→                .attr("stroke", sa.lineColor)
+   956→                .attr("stroke-width", sa.lineWidth);
+   957→        }
+   958→
+   959→        const y2Ticks = computeNiceTicks(sa.min, sa.max, 5);
+   960→        const y2Labels = y2AxisGroup
+   961→            .selectAll<SVGTextElement, number>("text.y2-label")
+   962→            .data(y2Ticks)
+   963→            .enter()
+   964→            .append("text")
+   965→            .attr("class", "y2-label")
+   966→            .attr("x", 8)
+   967→            .attr("y", (d) => y2Scale(d))
+   968→            .attr("dy", "0.32em")
+   969→            .attr("text-anchor", "start")
+   970→            .attr("font-family", sa.fontFamily)
+   971→            .attr("font-size", sa.fontSize)
+   972→            .attr("font-weight", sa.bold ? "bold" : "normal")
+   973→            .attr("font-style", sa.italic ? "italic" : "normal")
+   974→            .attr("text-decoration", sa.underline ? "underline" : "none")
+   975→            .attr("fill", sa.fontColor)
+   976→            .text((d) => `${d.toFixed(0)}%`);
+   977→
+   978→        void y2Labels;
+   979→    }
+   980→
+   981→    /* --------- Background click handler on SVG (clear selection) -------- */
+   982→    svg.addEventListener("click", (ev) => {
+   983→        const target = ev.target as Element;
+   984→        if (target && target.tagName.toLowerCase() === "svg") {
+   985→            opts.onBackgroundClick(ev as MouseEvent);
+   986→        }
+   987→    });
+   988→    svg.addEventListener("contextmenu", (ev) => {
+   989→        const target = ev.target as Element;
+   990→        if (target && target.tagName.toLowerCase() !== "rect") {
+   991→            ev.preventDefault();
+   992→            ev.stopPropagation();
+   993→            opts.onBackgroundContextMenu(ev as MouseEvent);
+   994→        }
+   995→    });
+   996→}
+   997→
+   998→/** Draw a marker (circle/square/triangle/diamond) inside a <g>. */
+   999→function drawMarker(
+  1000→    parent: GroupSel,
+  1001→    shape: string,
+  1002→    size: number,
+  1003→    color: string
+  1004→): void {
+  1005→    const r = size / 2;
+  1006→    switch (shape) {
+  1007→        case "Square":
+  1008→            parent
+  1009→                .append("rect")
+  1010→                .attr("x", -r)
+  1011→                .attr("y", -r)
+  1012→                .attr("width", size)
+  1013→                .attr("height", size)
+  1014→                .attr("fill", color);
+  1015→            break;
+  1016→        case "Triangle":
+  1017→            parent
+  1018→                .append("polygon")
+  1019→                .attr(
+  1020→                    "points",
+  1021→                    `0,${-r} ${r},${r} ${-r},${r}`
+  1022→                )
+  1023→                .attr("fill", color);
+  1024→            break;
+  1025→        case "Diamond":
+  1026→            parent
+  1027→                .append("polygon")
+  1028→                .attr(
+  1029→                    "points",
+  1030→                    `0,${-r} ${r},0 0,${r} ${-r},0`
+  1031→                )
+  1032→                .attr("fill", color);
+  1033→            break;
+  1034→        case "Circle":
+  1035→        default:
+  1036→            parent
+  1037→                .append("circle")
+  1038→                .attr("r", r)
+  1039→                .attr("fill", color);
+  1040→    }
+  1041→}
+  1042→
+  1043→/** Compute "nice" tick values for a [min, max] range. Pure numeric, no D3 axis. */
+  1044→function computeNiceTicks(min: number, max: number, count: number): number[] {
+  1045→    if (min === max) {
+  1046→        return [min];
+  1047→    }
+  1048→    const span = max - min;
+  1049→    const step0 = span / count;
+  1050→    const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  1051→    const norm = step0 / mag;
+  1052→    let step: number;
+  1053→    if (norm < 1.5) step = 1 * mag;
+  1054→    else if (norm < 3) step = 2 * mag;
+  1055→    else if (norm < 7) step = 5 * mag;
+  1056→    else step = 10 * mag;
+  1057→    const start = Math.ceil(min / step) * step;
+  1058→    const ticks: number[] = [];
+  1059→    for (let v = start; v <= max + step * 0.5; v += step) {
+  1060→        ticks.push(Math.round(v * 1e9) / 1e9);
+  1061→    }
+  1062→    return ticks;
+  1063→}
+  1064→
+  1065→/** Compute the visible-label step for labelDensity thinning. */
+  1066→function computeLabelStep(
+  1067→    total: number,
+  1068→    density: "ShowAll" | "Auto" | "Sparse"
+  1069→): number {
+  1070→    if (density === "ShowAll") return 1;
+  1071→    if (total <= 8) return 1;
+  1072→    if (density === "Auto") {
+  1073→        // ~10 labels max
+  1074→        return Math.max(1, Math.ceil(total / 10));
+  1075→    }
+  1076→    // Sparse: ~5 labels max
+  1077→    return Math.max(1, Math.ceil(total / 5));
+  1078→}
+  1079→
+  1080→/* ----------------------- Public helpers for visual.ts ----------------------- */
+  1081→
+  1082→/**
+  1083→ * Lightweight selection-state sync. Updates isSelected/isDimmed on the model
+  1084→ * and patches the CSS class + fill-opacity on each existing bar — does NOT
+  1085→ * change fill color (FIX #1: selected bars keep their original color).
+  1086→ */
+  1087→export function syncSelectionState(
+  1088→    svg: SVGSVGElement,
+  1089→    model: ParetoViewModel,
+  1090→    settings: ResolvedSettings
+  1091→): void {
+  1092→    const hasHighlight = model.hasHighlight;
+  1093→    const sel = d3.select(svg);
+  1094→    sel.selectAll<SVGRectElement, ParetoDataPoint>("rect.bar").each(function (
+  1095→        point
+  1096→    ) {
+  1097→        const bar = d3.select(this);
+  1098→        bar.attr("class", barClass(point));
+  1099→        bar.attr(
+  1100→            "fill-opacity",
+  1101→            resolveBarOpacity(point, settings, hasHighlight)
+  1102→        );
+  1103→    });
+  1104→}
+  1105→
+  1106→
+  1107→

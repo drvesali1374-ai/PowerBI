@@ -1,0 +1,1388 @@
+     1→import powerbi from "powerbi-visuals-api";
+     2→import { formattingSettings } from "powerbi-visuals-utils-formattingmodel";
+     3→
+     4→import {
+     5→    ColorMode,
+     6→    DashStyle,
+     7→    DurationFormat,
+     8→    LabelDensity,
+     9→    LabelPosition,
+    10→    LineStyle,
+    11→    MarkerShape,
+    12→    MaxLinesMode,
+    13→    SortOrder,
+    14→    TextRotation,
+    15→} from "./interfaces";
+    16→
+    17→import FormattingSettingsCard = formattingSettings.SimpleCard;
+    18→import FormattingSettingsSlice = formattingSettings.Slice;
+    19→import FormattingSettingsModel = formattingSettings.Model;
+    20→
+    21→/**
+    22→ * powerbi.visuals.ValidatorType is a `const enum` (Min=0, Max=1, Required=2).
+    23→ * The build chain inlines it, which would break under isolatedModules if we
+    24→ * referenced the enum symbol. We use numeric literals instead.
+    25→ */
+    26→const VT_MIN = 0;
+    27→const VT_MAX = 1;
+    28→
+    29→/**
+    30→ * Build an IEnumMember-shaped value object for ItemDropdown / AutoDropdown.
+    31→ * displayName is a plain string (DisplayText form of DisplayNameGetter).
+    32→ */
+    33→function enumItem(value: string, displayName: string): powerbi.IEnumMember {
+    34→    return { value, displayName } as powerbi.IEnumMember;
+    35→}
+    36→
+    37→/**
+    38→ * Read a string out of an ItemDropdown's `value` (IEnumMember). Falls back to
+    39→ * the provided default when the slice isn't populated yet.
+    40→ */
+    41→function readEnumValue(
+    42→    slice: formattingSettings.ItemDropdown,
+    43→    defaultValue: string
+    44→): string {
+    45→    const v = slice && slice.value;
+    46→    if (v && typeof v === "object" && typeof (v as any).value === "string") {
+    47→        return (v as any).value as string;
+    48→    }
+    49→    if (typeof v === "string") {
+    50→        return v;
+    51→    }
+    52→    return defaultValue;
+    53→}
+    54→
+    55→/**
+    56→ * Read a boolean slice value (ToggleSwitch). Falls back to default when the
+    57→ * slice isn't populated yet (Power BI passes undefined for "default" states).
+    58→ */
+    59→function readBool(
+    60→    slice: formattingSettings.ToggleSwitch | undefined,
+    61→    defaultValue: boolean
+    62→): boolean {
+    63→    if (slice && typeof slice.value === "boolean") {
+    64→        return slice.value;
+    65→    }
+    66→    return defaultValue;
+    67→}
+    68→
+    69→function readNumber(
+    70→    slice: formattingSettings.NumUpDown | undefined,
+    71→    defaultValue: number
+    72→): number {
+    73→    if (slice && typeof slice.value === "number" && isFinite(slice.value)) {
+    74→        return slice.value;
+    75→    }
+    76→    return defaultValue;
+    77→}
+    78→
+    79→function readString(
+    80→    slice:
+    81→        | formattingSettings.TextInput
+    82→        | formattingSettings.FontPicker
+    83→        | undefined,
+    84→    defaultValue: string
+    85→): string {
+    86→    if (slice && typeof slice.value === "string" && slice.value.length > 0) {
+    87→        return slice.value;
+    88→    }
+    89→    return defaultValue;
+    90→}
+    91→
+    92→function readColor(
+    93→    slice: formattingSettings.ColorPicker | undefined,
+    94→    defaultValue: string
+    95→): string {
+    96→    if (slice && slice.value && typeof slice.value.value === "string") {
+    97→        return slice.value.value;
+    98→    }
+    99→    return defaultValue;
+   100→}
+   101→
+   102→/* ----------------------------- Bars card ----------------------------- */
+   103→
+   104→class BarsCard extends FormattingSettingsCard {
+   105→    show = new formattingSettings.ToggleSwitch({
+   106→        name: "show",
+   107→        displayName: "Show bars",
+   108→        value: true,
+   109→    });
+   110→    barGap = new formattingSettings.NumUpDown({
+   111→        name: "barGap",
+   112→        displayName: "Bar gap (%)",
+   113→        value: 20,
+   114→        options: {
+   115→            minValue: { type: VT_MIN, value: 0 },
+   116→            maxValue: { type: VT_MAX, value: 90 },
+   117→        },
+   118→    });
+   119→    colorMode = new formattingSettings.ItemDropdown({
+   120→        name: "colorMode",
+   121→        displayName: "Color mode",
+   122→        value: enumItem("Gradient", "Gradient"),
+   123→        items: [
+   124→            enumItem("Default", "Default color"),
+   125→            enumItem("Single", "Single color"),
+   126→            enumItem("Gradient", "Gradient"),
+   127→            enumItem("Category", "Color by category"),
+   128→        ],
+   129→    });
+   130→    defaultColor = new formattingSettings.ColorPicker({
+   131→        name: "defaultColor",
+   132→        displayName: "Default color",
+   133→        value: { value: "#AFBDE1" },
+   134→    });
+   135→    singleColor = new formattingSettings.ColorPicker({
+   136→        name: "singleColor",
+   137→        displayName: "Single color",
+   138→        value: { value: "#F7E6C8" },
+   139→    });
+   140→    gradientColorCount = new formattingSettings.NumUpDown({
+   141→        name: "gradientColorCount",
+   142→        displayName: "Gradient color count",
+   143→        value: 2,
+   144→        options: {
+   145→            minValue: { type: VT_MIN, value: 2 },
+   146→            maxValue: { type: VT_MAX, value: 5 },
+   147→        },
+   148→    });
+   149→    gradientColor1 = new formattingSettings.ColorPicker({
+   150→        name: "gradientColor1",
+   151→        displayName: "Gradient color 1",
+   152→        value: { value: "#1F2A5A" },
+   153→    });
+   154→    gradientColor2 = new formattingSettings.ColorPicker({
+   155→        name: "gradientColor2",
+   156→        displayName: "Gradient color 2",
+   157→        value: { value: "#AFBDE1" },
+   158→    });
+   159→    gradientColor3 = new formattingSettings.ColorPicker({
+   160→        name: "gradientColor3",
+   161→        displayName: "Gradient color 3",
+   162→        value: { value: "#AFBDE1" },
+   163→    });
+   164→    gradientColor4 = new formattingSettings.ColorPicker({
+   165→        name: "gradientColor4",
+   166→        displayName: "Gradient color 4",
+   167→        value: { value: "#D4DBED" },
+   168→    });
+   169→    gradientColor5 = new formattingSettings.ColorPicker({
+   170→        name: "gradientColor5",
+   171→        displayName: "Gradient color 5",
+   172→        value: { value: "#F0F3FA" },
+   173→    });
+   174→    opacity = new formattingSettings.NumUpDown({
+   175→        name: "opacity",
+   176→        displayName: "Opacity (%)",
+   177→        value: 100,
+   178→        options: {
+   179→            minValue: { type: VT_MIN, value: 10 },
+   180→            maxValue: { type: VT_MAX, value: 100 },
+   181→        },
+   182→    });
+   183→
+   184→    name = "bars";
+   185→    displayName = "Bars";
+   186→    slices: FormattingSettingsSlice[] = [
+   187→        this.show,
+   188→        this.barGap,
+   189→        this.colorMode,
+   190→        this.defaultColor,
+   191→        this.singleColor,
+   192→        this.gradientColorCount,
+   193→        this.gradientColor1,
+   194→        this.gradientColor2,
+   195→        this.gradientColor3,
+   196→        this.gradientColor4,
+   197→        this.gradientColor5,
+   198→        this.opacity,
+   199→    ];
+   200→
+   201→    public onPreProcess(): void {
+   202→        const show = readBool(this.show, true);
+   203→        const mode = readEnumValue(this.colorMode, "Gradient") as ColorMode;
+   204→        const count = readNumber(this.gradientColorCount, 2);
+   205→
+   206→        const allSlices = [
+   207→            this.barGap,
+   208→            this.colorMode,
+   209→            this.defaultColor,
+   210→            this.singleColor,
+   211→            this.gradientColorCount,
+   212→            this.gradientColor1,
+   213→            this.gradientColor2,
+   214→            this.gradientColor3,
+   215→            this.gradientColor4,
+   216→            this.gradientColor5,
+   217→            this.opacity,
+   218→        ];
+   219→        for (const s of allSlices) {
+   220→            s.visible = show;
+   221→        }
+   222→        // Color pickers depend on mode.
+   223→        this.defaultColor.visible = show && mode === "Default";
+   224→        this.singleColor.visible = show && mode === "Single";
+   225→        this.gradientColorCount.visible = show && mode === "Gradient";
+   226→        this.gradientColor1.visible = show && mode === "Gradient" && count >= 1;
+   227→        this.gradientColor2.visible = show && mode === "Gradient" && count >= 2;
+   228→        this.gradientColor3.visible = show && mode === "Gradient" && count >= 3;
+   229→        this.gradientColor4.visible = show && mode === "Gradient" && count >= 4;
+   230→        this.gradientColor5.visible = show && mode === "Gradient" && count >= 5;
+   231→    }
+   232→}
+   233→
+   234→/* -------------------------- Bar Data Labels -------------------------- */
+   235→
+   236→class BarDataLabelsCard extends FormattingSettingsCard {
+   237→    show = new formattingSettings.ToggleSwitch({
+   238→        name: "show",
+   239→        displayName: "Show data labels",
+   240→        value: true,
+   241→    });
+   242→    format = new formattingSettings.ItemDropdown({
+   243→        name: "format",
+   244→        displayName: "Format",
+   245→        value: enumItem("Auto", "Auto"),
+   246→        items: [
+   247→            enumItem("Auto", "Auto"),
+   248→            enumItem("Decimal", "Decimal"),
+   249→            enumItem("Hours", "Hours"),
+   250→            enumItem("HHMM", "HH:MM"),
+   251→            enumItem("HHMMSS", "HH:MM:SS"),
+   252→            enumItem("Human", "Human Readable"),
+   253→        ],
+   254→    });
+   255→    fontFamily = new formattingSettings.FontPicker({
+   256→        name: "fontFamily",
+   257→        displayName: "Font family",
+   258→        value: "Segoe UI",
+   259→    });
+   260→    fontSize = new formattingSettings.NumUpDown({
+   261→        name: "fontSize",
+   262→        displayName: "Text size",
+   263→        value: 11,
+   264→        options: {
+   265→            minValue: { type: VT_MIN, value: 6 },
+   266→            maxValue: { type: VT_MAX, value: 48 },
+   267→        },
+   268→    });
+   269→    bold = new formattingSettings.ToggleSwitch({
+   270→        name: "bold",
+   271→        displayName: "Bold",
+   272→        value: false,
+   273→    });
+   274→    italic = new formattingSettings.ToggleSwitch({
+   275→        name: "italic",
+   276→        displayName: "Italic",
+   277→        value: false,
+   278→    });
+   279→    underline = new formattingSettings.ToggleSwitch({
+   280→        name: "underline",
+   281→        displayName: "Underline",
+   282→        value: false,
+   283→    });
+   284→    color = new formattingSettings.ColorPicker({
+   285→        name: "color",
+   286→        displayName: "Color",
+   287→        value: { value: "#333333" },
+   288→    });
+   289→    position = new formattingSettings.ItemDropdown({
+   290→        name: "position",
+   291→        displayName: "Position",
+   292→        value: enumItem("Above", "Above"),
+   293→        items: [
+   294→            enumItem("Above", "Above"),
+   295→            enumItem("Below", "Below"),
+   296→            enumItem("InsideEnd", "Inside End"),
+   297→            enumItem("InsideBase", "Inside Base"),
+   298→        ],
+   299→    });
+   300→    showBackground = new formattingSettings.ToggleSwitch({
+   301→        name: "showBackground",
+   302→        displayName: "Show background",
+   303→        value: false,
+   304→    });
+   305→    backgroundColor = new formattingSettings.ColorPicker({
+   306→        name: "backgroundColor",
+   307→        displayName: "Background color",
+   308→        value: { value: "#FFFFFF" },
+   309→    });
+   310→    backgroundTransparency = new formattingSettings.NumUpDown({
+   311→        name: "backgroundTransparency",
+   312→        displayName: "Background transparency (%)",
+   313→        value: 0,
+   314→        options: {
+   315→            minValue: { type: VT_MIN, value: 0 },
+   316→            maxValue: { type: VT_MAX, value: 100 },
+   317→        },
+   318→    });
+   319→
+   320→    name = "barDataLabels";
+   321→    displayName = "Bar data labels";
+   322→    slices: FormattingSettingsSlice[] = [
+   323→        this.show,
+   324→        this.format,
+   325→        this.fontFamily,
+   326→        this.fontSize,
+   327→        this.bold,
+   328→        this.italic,
+   329→        this.underline,
+   330→        this.color,
+   331→        this.position,
+   332→        this.showBackground,
+   333→        this.backgroundColor,
+   334→        this.backgroundTransparency,
+   335→    ];
+   336→
+   337→    public onPreProcess(): void {
+   338→        const show = readBool(this.show, true);
+   339→        const bg = readBool(this.showBackground, false);
+   340→        const visibleSlices = [
+   341→            this.format,
+   342→            this.fontFamily,
+   343→            this.fontSize,
+   344→            this.bold,
+   345→            this.italic,
+   346→            this.underline,
+   347→            this.color,
+   348→            this.position,
+   349→            this.showBackground,
+   350→        ];
+   351→        for (const s of visibleSlices) {
+   352→            s.visible = show;
+   353→        }
+   354→        this.backgroundColor.visible = show && bg;
+   355→        this.backgroundTransparency.visible = show && bg;
+   356→    }
+   357→}
+   358→
+   359→/* --------------------------- Cumulative Line ------------------------- */
+   360→
+   361→class CumulativeLineCard extends FormattingSettingsCard {
+   362→    show = new formattingSettings.ToggleSwitch({
+   363→        name: "show",
+   364→        displayName: "Show cumulative curve",
+   365→        value: true,
+   366→    });
+   367→    color = new formattingSettings.ColorPicker({
+   368→        name: "color",
+   369→        displayName: "Color",
+   370→        value: { value: "#1F2A5A" },
+   371→    });
+   372→    width = new formattingSettings.NumUpDown({
+   373→        name: "width",
+   374→        displayName: "Line width",
+   375→        value: 2,
+   376→        options: {
+   377→            minValue: { type: VT_MIN, value: 1 },
+   378→            maxValue: { type: VT_MAX, value: 8 },
+   379→        },
+   380→    });
+   381→    lineStyle = new formattingSettings.ItemDropdown({
+   382→        name: "lineStyle",
+   383→        displayName: "Line style",
+   384→        value: enumItem("Solid", "Solid"),
+   385→        items: [
+   386→            enumItem("Solid", "Solid"),
+   387→            enumItem("Dashed", "Dashed"),
+   388→            enumItem("Dotted", "Dotted"),
+   389→        ],
+   390→    });
+   391→    showMarkers = new formattingSettings.ToggleSwitch({
+   392→        name: "showMarkers",
+   393→        displayName: "Show markers",
+   394→        value: true,
+   395→    });
+   396→    markerShape = new formattingSettings.ItemDropdown({
+   397→        name: "markerShape",
+   398→        displayName: "Marker shape",
+   399→        value: enumItem("Circle", "Circle"),
+   400→        items: [
+   401→            enumItem("Circle", "Circle"),
+   402→            enumItem("Square", "Square"),
+   403→            enumItem("Triangle", "Triangle"),
+   404→            enumItem("Diamond", "Diamond"),
+   405→        ],
+   406→    });
+   407→    markerSize = new formattingSettings.NumUpDown({
+   408→        name: "markerSize",
+   409→        displayName: "Marker size",
+   410→        value: 5,
+   411→        options: {
+   412→            minValue: { type: VT_MIN, value: 2 },
+   413→            maxValue: { type: VT_MAX, value: 14 },
+   414→        },
+   415→    });
+   416→    markerColor = new formattingSettings.ColorPicker({
+   417→        name: "markerColor",
+   418→        displayName: "Marker color",
+   419→        value: { value: "#1F2A5A" },
+   420→    });
+   421→    showLabels = new formattingSettings.ToggleSwitch({
+   422→        name: "showLabels",
+   423→        displayName: "Show percentage labels",
+   424→        value: true,
+   425→    });
+   426→    labelFontFamily = new formattingSettings.FontPicker({
+   427→        name: "labelFontFamily",
+   428→        displayName: "Label font family",
+   429→        value: "Segoe UI",
+   430→    });
+   431→    labelFontSize = new formattingSettings.NumUpDown({
+   432→        name: "labelFontSize",
+   433→        displayName: "Label text size",
+   434→        value: 10,
+   435→        options: {
+   436→            minValue: { type: VT_MIN, value: 6 },
+   437→            maxValue: { type: VT_MAX, value: 32 },
+   438→        },
+   439→    });
+   440→    labelBold = new formattingSettings.ToggleSwitch({
+   441→        name: "labelBold",
+   442→        displayName: "Label bold",
+   443→        value: false,
+   444→    });
+   445→    labelItalic = new formattingSettings.ToggleSwitch({
+   446→        name: "labelItalic",
+   447→        displayName: "Label italic",
+   448→        value: false,
+   449→    });
+   450→    labelUnderline = new formattingSettings.ToggleSwitch({
+   451→        name: "labelUnderline",
+   452→        displayName: "Label underline",
+   453→        value: false,
+   454→    });
+   455→    labelColor = new formattingSettings.ColorPicker({
+   456→        name: "labelColor",
+   457→        displayName: "Label color",
+   458→        value: { value: "#1F2A5A" },
+   459→    });
+   460→    labelDecimalPlaces = new formattingSettings.NumUpDown({
+   461→        name: "labelDecimalPlaces",
+   462→        displayName: "Decimal places",
+   463→        value: 1,
+   464→        options: {
+   465→            minValue: { type: VT_MIN, value: 0 },
+   466→            maxValue: { type: VT_MAX, value: 10 },
+   467→        },
+   468→    });
+   469→    labelShowBackground = new formattingSettings.ToggleSwitch({
+   470→        name: "labelShowBackground",
+   471→        displayName: "Show label background",
+   472→        value: false,
+   473→    });
+   474→    labelBackgroundColor = new formattingSettings.ColorPicker({
+   475→        name: "labelBackgroundColor",
+   476→        displayName: "Label background color",
+   477→        value: { value: "#FFFFFF" },
+   478→    });
+   479→    labelBackgroundTransparency = new formattingSettings.NumUpDown({
+   480→        name: "labelBackgroundTransparency",
+   481→        displayName: "Label background transparency (%)",
+   482→        value: 0,
+   483→        options: {
+   484→            minValue: { type: VT_MIN, value: 0 },
+   485→            maxValue: { type: VT_MAX, value: 100 },
+   486→        },
+   487→    });
+   488→
+   489→    name = "cumulativeLine";
+   490→    displayName = "Cumulative curve";
+   491→    slices: FormattingSettingsSlice[] = [
+   492→        this.show,
+   493→        this.color,
+   494→        this.width,
+   495→        this.lineStyle,
+   496→        this.showMarkers,
+   497→        this.markerShape,
+   498→        this.markerSize,
+   499→        this.markerColor,
+   500→        this.showLabels,
+   501→        this.labelFontFamily,
+   502→        this.labelFontSize,
+   503→        this.labelBold,
+   504→        this.labelItalic,
+   505→        this.labelUnderline,
+   506→        this.labelColor,
+   507→        this.labelDecimalPlaces,
+   508→        this.labelShowBackground,
+   509→        this.labelBackgroundColor,
+   510→        this.labelBackgroundTransparency,
+   511→    ];
+   512→
+   513→    public onPreProcess(): void {
+   514→        const show = readBool(this.show, true);
+   515→        const markers = readBool(this.showMarkers, true);
+   516→        const labels = readBool(this.showLabels, true);
+   517→        const labelBg = readBool(this.labelShowBackground, false);
+   518→        const lineSlices = [
+   519→            this.color,
+   520→            this.width,
+   521→            this.lineStyle,
+   522→            this.showMarkers,
+   523→        ];
+   524→        for (const s of lineSlices) s.visible = show;
+   525→        this.markerShape.visible = show && markers;
+   526→        this.markerSize.visible = show && markers;
+   527→        this.markerColor.visible = show && markers;
+   528→        const labelSlices = [
+   529→            this.showLabels,
+   530→            this.labelFontFamily,
+   531→            this.labelFontSize,
+   532→            this.labelBold,
+   533→            this.labelItalic,
+   534→            this.labelUnderline,
+   535→            this.labelColor,
+   536→            this.labelDecimalPlaces,
+   537→            this.labelShowBackground,
+   538→        ];
+   539→        for (const s of labelSlices) s.visible = show && labels;
+   540→        this.labelBackgroundColor.visible = show && labels && labelBg;
+   541→        this.labelBackgroundTransparency.visible = show && labels && labelBg;
+   542→    }
+   543→}
+   544→
+   545→/* --------------------------- Reference Line -------------------------- */
+   546→
+   547→class ReferenceLineCard extends FormattingSettingsCard {
+   548→    show = new formattingSettings.ToggleSwitch({
+   549→        name: "show",
+   550→        displayName: "Show reference line",
+   551→        value: true,
+   552→    });
+   553→    value = new formattingSettings.NumUpDown({
+   554→        name: "value",
+   555→        displayName: "Reference value (%)",
+   556→        value: 80,
+   557→        options: {
+   558→            minValue: { type: VT_MIN, value: 0 },
+   559→            maxValue: { type: VT_MAX, value: 100 },
+   560→        },
+   561→    });
+   562→    color = new formattingSettings.ColorPicker({
+   563→        name: "color",
+   564→        displayName: "Color",
+   565→        value: { value: "#E81123" },
+   566→    });
+   567→    width = new formattingSettings.NumUpDown({
+   568→        name: "width",
+   569→        displayName: "Line width",
+   570→        value: 1.5,
+   571→        options: {
+   572→            minValue: { type: VT_MIN, value: 0.5 },
+   573→            maxValue: { type: VT_MAX, value: 6 },
+   574→        },
+   575→    });
+   576→    dashStyle = new formattingSettings.ItemDropdown({
+   577→        name: "dashStyle",
+   578→        displayName: "Dash style",
+   579→        value: enumItem("Dashed", "Dashed"),
+   580→        items: [
+   581→            enumItem("Solid", "Solid"),
+   582→            enumItem("Dashed", "Dashed"),
+   583→            enumItem("Dotted", "Dotted"),
+   584→        ],
+   585→    });
+   586→    labelFontFamily = new formattingSettings.FontPicker({
+   587→        name: "labelFontFamily",
+   588→        displayName: "Label font family",
+   589→        value: "Segoe UI",
+   590→    });
+   591→    labelFontSize = new formattingSettings.NumUpDown({
+   592→        name: "labelFontSize",
+   593→        displayName: "Label text size",
+   594→        value: 11,
+   595→        options: {
+   596→            minValue: { type: VT_MIN, value: 6 },
+   597→            maxValue: { type: VT_MAX, value: 32 },
+   598→        },
+   599→    });
+   600→    labelBold = new formattingSettings.ToggleSwitch({
+   601→        name: "labelBold",
+   602→        displayName: "Label bold",
+   603→        value: true,
+   604→    });
+   605→
+   606→    name = "referenceLine";
+   607→    displayName = "Reference line";
+   608→    slices: FormattingSettingsSlice[] = [
+   609→        this.show,
+   610→        this.value,
+   611→        this.color,
+   612→        this.width,
+   613→        this.dashStyle,
+   614→        this.labelFontFamily,
+   615→        this.labelFontSize,
+   616→        this.labelBold,
+   617→    ];
+   618→
+   619→    public onPreProcess(): void {
+   620→        const show = readBool(this.show, true);
+   621→        for (const s of this.slices) {
+   622→            if (s === this.show) continue;
+   623→            (s as any).visible = show;
+   624→        }
+   625→    }
+   626→}
+   627→
+   628→/* ------------------------------- X Axis ------------------------------ */
+   629→
+   630→class XAxisCard extends FormattingSettingsCard {
+   631→    show = new formattingSettings.ToggleSwitch({
+   632→        name: "show",
+   633→        displayName: "Show X axis",
+   634→        value: true,
+   635→    });
+   636→    showLine = new formattingSettings.ToggleSwitch({
+   637→        name: "showLine",
+   638→        displayName: "Show axis line",
+   639→        value: true,
+   640→    });
+   641→    lineColor = new formattingSettings.ColorPicker({
+   642→        name: "lineColor",
+   643→        displayName: "Line color",
+   644→        value: { value: "#888888" },
+   645→    });
+   646→    lineWidth = new formattingSettings.NumUpDown({
+   647→        name: "lineWidth",
+   648→        displayName: "Line width",
+   649→        value: 1,
+   650→        options: {
+   651→            minValue: { type: VT_MIN, value: 0.5 },
+   652→            maxValue: { type: VT_MAX, value: 6 },
+   653→        },
+   654→    });
+   655→    fontFamily = new formattingSettings.FontPicker({
+   656→        name: "fontFamily",
+   657→        displayName: "Font family",
+   658→        value: "Segoe UI",
+   659→    });
+   660→    fontSize = new formattingSettings.NumUpDown({
+   661→        name: "fontSize",
+   662→        displayName: "Text size",
+   663→        value: 11,
+   664→        options: {
+   665→            minValue: { type: VT_MIN, value: 6 },
+   666→            maxValue: { type: VT_MAX, value: 32 },
+   667→        },
+   668→    });
+   669→    bold = new formattingSettings.ToggleSwitch({
+   670→        name: "bold",
+   671→        displayName: "Bold",
+   672→        value: false,
+   673→    });
+   674→    italic = new formattingSettings.ToggleSwitch({
+   675→        name: "italic",
+   676→        displayName: "Italic",
+   677→        value: false,
+   678→    });
+   679→    underline = new formattingSettings.ToggleSwitch({
+   680→        name: "underline",
+   681→        displayName: "Underline",
+   682→        value: false,
+   683→    });
+   684→    fontColor = new formattingSettings.ColorPicker({
+   685→        name: "fontColor",
+   686→        displayName: "Font color",
+   687→        value: { value: "#444444" },
+   688→    });
+   689→    textRotation = new formattingSettings.ItemDropdown({
+   690→        name: "textRotation",
+   691→        displayName: "Text rotation",
+   692→        value: enumItem("Rotation0", "0°"),
+   693→        items: [
+   694→            enumItem("Rotation0", "0°"),
+   695→            enumItem("Rotation45", "45°"),
+   696→            enumItem("Rotation90", "90°"),
+   697→        ],
+   698→    });
+   699→    labelDensity = new formattingSettings.ItemDropdown({
+   700→        name: "labelDensity",
+   701→        displayName: "Label density",
+   702→        value: enumItem("Auto", "Auto"),
+   703→        items: [
+   704→            enumItem("ShowAll", "Show all"),
+   705→            enumItem("Auto", "Auto"),
+   706→            enumItem("Sparse", "Sparse"),
+   707→        ],
+   708→    });
+   709→    wordWrap = new formattingSettings.ToggleSwitch({
+   710→        name: "wordWrap",
+   711→        displayName: "Word wrap",
+   712→        value: true,
+   713→    });
+   714→    maxLinesMode = new formattingSettings.ItemDropdown({
+   715→        name: "maxLinesMode",
+   716→        displayName: "Max lines mode",
+   717→        value: enumItem("Auto", "Auto"),
+   718→        items: [
+   719→            enumItem("Auto", "Auto"),
+   720→            enumItem("Number", "Number of lines"),
+   721→        ],
+   722→    });
+   723→    maxLines = new formattingSettings.NumUpDown({
+   724→        name: "maxLines",
+   725→        displayName: "Max lines",
+   726→        value: 3,
+   727→        options: {
+   728→            minValue: { type: VT_MIN, value: 1 },
+   729→            maxValue: { type: VT_MAX, value: 10 },
+   730→        },
+   731→    });
+   732→
+   733→    name = "xAxis";
+   734→    displayName = "X axis";
+   735→    slices: FormattingSettingsSlice[] = [
+   736→        this.show,
+   737→        this.showLine,
+   738→        this.lineColor,
+   739→        this.lineWidth,
+   740→        this.fontFamily,
+   741→        this.fontSize,
+   742→        this.bold,
+   743→        this.italic,
+   744→        this.underline,
+   745→        this.fontColor,
+   746→        this.textRotation,
+   747→        this.labelDensity,
+   748→        this.wordWrap,
+   749→        this.maxLinesMode,
+   750→        this.maxLines,
+   751→    ];
+   752→
+   753→    public onPreProcess(): void {
+   754→        const show = readBool(this.show, true);
+   755→        const showLine = readBool(this.showLine, true);
+   756→        const wordWrap = readBool(this.wordWrap, true);
+   757→        const maxLinesMode = readEnumValue(this.maxLinesMode, "Auto") as MaxLinesMode;
+   758→        const lineOnly = [this.lineColor, this.lineWidth];
+   759→        const fontSlices = [
+   760→            this.fontFamily,
+   761→            this.fontSize,
+   762→            this.bold,
+   763→            this.italic,
+   764→            this.underline,
+   765→            this.fontColor,
+   766→            this.textRotation,
+   767→            this.labelDensity,
+   768→            this.wordWrap,
+   769→        ];
+   770→        for (const s of this.slices) {
+   771→            if (s === this.show) continue;
+   772→            (s as any).visible = show;
+   773→        }
+   774→        for (const s of lineOnly) s.visible = show && showLine;
+   775→        this.maxLinesMode.visible = show && wordWrap;
+   776→        this.maxLines.visible = show && wordWrap && maxLinesMode === "Number";
+   777→    }
+   778→}
+   779→
+   780→/* ------------------------------- Y Axis ------------------------------ */
+   781→
+   782→class YAxisCard extends FormattingSettingsCard {
+   783→    show = new formattingSettings.ToggleSwitch({
+   784→        name: "show",
+   785→        displayName: "Show Y axis",
+   786→        value: true,
+   787→    });
+   788→    showLine = new formattingSettings.ToggleSwitch({
+   789→        name: "showLine",
+   790→        displayName: "Show axis line",
+   791→        value: true,
+   792→    });
+   793→    lineColor = new formattingSettings.ColorPicker({
+   794→        name: "lineColor",
+   795→        displayName: "Line color",
+   796→        value: { value: "#CCCCCC" },
+   797→    });
+   798→    lineWidth = new formattingSettings.NumUpDown({
+   799→        name: "lineWidth",
+   800→        displayName: "Line width",
+   801→        value: 1,
+   802→        options: {
+   803→            minValue: { type: VT_MIN, value: 0.5 },
+   804→            maxValue: { type: VT_MAX, value: 6 },
+   805→        },
+   806→    });
+   807→    title = new formattingSettings.TextInput({
+   808→        name: "title",
+   809→        displayName: "Title",
+   810→        value: "Value",
+   811→        placeholder: "Enter axis title",
+   812→    });
+   813→    fontFamily = new formattingSettings.FontPicker({
+   814→        name: "fontFamily",
+   815→        displayName: "Font family",
+   816→        value: "Segoe UI",
+   817→    });
+   818→    fontSize = new formattingSettings.NumUpDown({
+   819→        name: "fontSize",
+   820→        displayName: "Text size",
+   821→        value: 11,
+   822→        options: {
+   823→            minValue: { type: VT_MIN, value: 6 },
+   824→            maxValue: { type: VT_MAX, value: 32 },
+   825→        },
+   826→    });
+   827→    bold = new formattingSettings.ToggleSwitch({
+   828→        name: "bold",
+   829→        displayName: "Bold",
+   830→        value: false,
+   831→    });
+   832→    italic = new formattingSettings.ToggleSwitch({
+   833→        name: "italic",
+   834→        displayName: "Italic",
+   835→        value: false,
+   836→    });
+   837→    underline = new formattingSettings.ToggleSwitch({
+   838→        name: "underline",
+   839→        displayName: "Underline",
+   840→        value: false,
+   841→    });
+   842→    fontColor = new formattingSettings.ColorPicker({
+   843→        name: "fontColor",
+   844→        displayName: "Font color",
+   845→        value: { value: "#444444" },
+   846→    });
+   847→    valueFormat = new formattingSettings.ItemDropdown({
+   848→        name: "valueFormat",
+   849→        displayName: "Value format",
+   850→        value: enumItem("Auto", "Auto"),
+   851→        items: [
+   852→            enumItem("Auto", "Auto"),
+   853→            enumItem("Decimal", "Decimal"),
+   854→            enumItem("Hours", "Hours"),
+   855→            enumItem("HHMM", "HH:MM"),
+   856→            enumItem("HHMMSS", "HH:MM:SS"),
+   857→            enumItem("Human", "Human Readable"),
+   858→        ],
+   859→    });
+   860→
+   861→    name = "yAxis";
+   862→    displayName = "Y axis";
+   863→    slices: FormattingSettingsSlice[] = [
+   864→        this.show,
+   865→        this.showLine,
+   866→        this.lineColor,
+   867→        this.lineWidth,
+   868→        this.title,
+   869→        this.fontFamily,
+   870→        this.fontSize,
+   871→        this.bold,
+   872→        this.italic,
+   873→        this.underline,
+   874→        this.fontColor,
+   875→        this.valueFormat,
+   876→    ];
+   877→
+   878→    public onPreProcess(): void {
+   879→        const show = readBool(this.show, true);
+   880→        const showLine = readBool(this.showLine, true);
+   881→        for (const s of this.slices) {
+   882→            if (s === this.show) continue;
+   883→            (s as any).visible = show;
+   884→        }
+   885→        this.lineColor.visible = show && showLine;
+   886→        this.lineWidth.visible = show && showLine;
+   887→    }
+   888→}
+   889→
+   890→/* --------------------------- Secondary Axis -------------------------- */
+   891→
+   892→class SecondaryAxisCard extends FormattingSettingsCard {
+   893→    show = new formattingSettings.ToggleSwitch({
+   894→        name: "show",
+   895→        displayName: "Show secondary axis",
+   896→        value: true,
+   897→    });
+   898→    showLine = new formattingSettings.ToggleSwitch({
+   899→        name: "showLine",
+   900→        displayName: "Show axis line",
+   901→        value: true,
+   902→    });
+   903→    lineColor = new formattingSettings.ColorPicker({
+   904→        name: "lineColor",
+   905→        displayName: "Line color",
+   906→        value: { value: "#CCCCCC" },
+   907→    });
+   908→    lineWidth = new formattingSettings.NumUpDown({
+   909→        name: "lineWidth",
+   910→        displayName: "Line width",
+   911→        value: 1,
+   912→        options: {
+   913→            minValue: { type: VT_MIN, value: 0.5 },
+   914→            maxValue: { type: VT_MAX, value: 6 },
+   915→        },
+   916→    });
+   917→    min = new formattingSettings.NumUpDown({
+   918→        name: "min",
+   919→        displayName: "Min (%)",
+   920→        value: 0,
+   921→        options: {
+   922→            minValue: { type: VT_MIN, value: 0 },
+   923→            maxValue: { type: VT_MAX, value: 100 },
+   924→        },
+   925→    });
+   926→    max = new formattingSettings.NumUpDown({
+   927→        name: "max",
+   928→        displayName: "Max (%)",
+   929→        value: 100,
+   930→        options: {
+   931→            minValue: { type: VT_MIN, value: 0 },
+   932→            maxValue: { type: VT_MAX, value: 200 },
+   933→        },
+   934→    });
+   935→    fontFamily = new formattingSettings.FontPicker({
+   936→        name: "fontFamily",
+   937→        displayName: "Font family",
+   938→        value: "Segoe UI",
+   939→    });
+   940→    fontSize = new formattingSettings.NumUpDown({
+   941→        name: "fontSize",
+   942→        displayName: "Text size",
+   943→        value: 11,
+   944→        options: {
+   945→            minValue: { type: VT_MIN, value: 6 },
+   946→            maxValue: { type: VT_MAX, value: 32 },
+   947→        },
+   948→    });
+   949→    bold = new formattingSettings.ToggleSwitch({
+   950→        name: "bold",
+   951→        displayName: "Bold",
+   952→        value: false,
+   953→    });
+   954→    italic = new formattingSettings.ToggleSwitch({
+   955→        name: "italic",
+   956→        displayName: "Italic",
+   957→        value: false,
+   958→    });
+   959→    underline = new formattingSettings.ToggleSwitch({
+   960→        name: "underline",
+   961→        displayName: "Underline",
+   962→        value: false,
+   963→    });
+   964→    fontColor = new formattingSettings.ColorPicker({
+   965→        name: "fontColor",
+   966→        displayName: "Font color",
+   967→        value: { value: "#444444" },
+   968→    });
+   969→
+   970→    name = "secondaryAxis";
+   971→    displayName = "Secondary axis (cumulative %)";
+   972→    slices: FormattingSettingsSlice[] = [
+   973→        this.show,
+   974→        this.showLine,
+   975→        this.lineColor,
+   976→        this.lineWidth,
+   977→        this.min,
+   978→        this.max,
+   979→        this.fontFamily,
+   980→        this.fontSize,
+   981→        this.bold,
+   982→        this.italic,
+   983→        this.underline,
+   984→        this.fontColor,
+   985→    ];
+   986→
+   987→    public onPreProcess(): void {
+   988→        const show = readBool(this.show, true);
+   989→        const showLine = readBool(this.showLine, true);
+   990→        for (const s of this.slices) {
+   991→            if (s === this.show) continue;
+   992→            (s as any).visible = show;
+   993→        }
+   994→        this.lineColor.visible = show && showLine;
+   995→        this.lineWidth.visible = show && showLine;
+   996→    }
+   997→}
+   998→
+   999→/* ------------------------------ Tooltip ------------------------------ */
+  1000→
+  1001→class TooltipCard extends FormattingSettingsCard {
+  1002→    show = new formattingSettings.ToggleSwitch({
+  1003→        name: "show",
+  1004→        displayName: "Show tooltips",
+  1005→        value: true,
+  1006→    });
+  1007→
+  1008→    name = "tooltip";
+  1009→    displayName = "Tooltip";
+  1010→    slices: FormattingSettingsSlice[] = [this.show];
+  1011→}
+  1012→
+  1013→/* ------------------------------ Sorting ------------------------------ */
+  1014→
+  1015→class SortingCard extends FormattingSettingsCard {
+  1016→    order = new formattingSettings.ItemDropdown({
+  1017→        name: "order",
+  1018→        displayName: "Sort order",
+  1019→        value: enumItem("DescendingByValue", "Descending by Value (Pareto)"),
+  1020→        items: [
+  1021→            enumItem("DescendingByValue", "Descending by Value (Pareto)"),
+  1022→            enumItem("AscendingByValue", "Ascending by Value"),
+  1023→            enumItem("DescendingByCategory", "Descending by Category"),
+  1024→            enumItem("AscendingByCategory", "Ascending by Category"),
+  1025→        ],
+  1026→    });
+  1027→
+  1028→    name = "sorting";
+  1029→    displayName = "Sorting";
+  1030→    slices: FormattingSettingsSlice[] = [this.order];
+  1031→}
+  1032→
+  1033→/* ----------------------------- Background ---------------------------- */
+  1034→
+  1035→class BackgroundCard extends FormattingSettingsCard {
+  1036→    show = new formattingSettings.ToggleSwitch({
+  1037→        name: "show",
+  1038→        displayName: "Show background",
+  1039→        value: false,
+  1040→    });
+  1041→    color = new formattingSettings.ColorPicker({
+  1042→        name: "color",
+  1043→        displayName: "Color",
+  1044→        value: { value: "#FFFFFF" },
+  1045→    });
+  1046→    transparency = new formattingSettings.NumUpDown({
+  1047→        name: "transparency",
+  1048→        displayName: "Transparency (%)",
+  1049→        value: 0,
+  1050→        options: {
+  1051→            minValue: { type: VT_MIN, value: 0 },
+  1052→            maxValue: { type: VT_MAX, value: 100 },
+  1053→        },
+  1054→    });
+  1055→
+  1056→    name = "background";
+  1057→    displayName = "Background";
+  1058→    slices: FormattingSettingsSlice[] = [this.show, this.color, this.transparency];
+  1059→
+  1060→    public onPreProcess(): void {
+  1061→        const show = readBool(this.show, false);
+  1062→        this.color.visible = show;
+  1063→        this.transparency.visible = show;
+  1064→    }
+  1065→}
+  1066→
+  1067→/* ----------------------- Visual settings model ----------------------- */
+  1068→
+  1069→export class VisualFormattingSettingsModel extends FormattingSettingsModel {
+  1070→    bars = new BarsCard();
+  1071→    barDataLabels = new BarDataLabelsCard();
+  1072→    cumulativeLine = new CumulativeLineCard();
+  1073→    referenceLine = new ReferenceLineCard();
+  1074→    xAxis = new XAxisCard();
+  1075→    yAxis = new YAxisCard();
+  1076→    secondaryAxis = new SecondaryAxisCard();
+  1077→    tooltip = new TooltipCard();
+  1078→    sorting = new SortingCard();
+  1079→    background = new BackgroundCard();
+  1080→
+  1081→    cards = [
+  1082→        this.bars,
+  1083→        this.barDataLabels,
+  1084→        this.cumulativeLine,
+  1085→        this.referenceLine,
+  1086→        this.xAxis,
+  1087→        this.yAxis,
+  1088→        this.secondaryAxis,
+  1089→        this.tooltip,
+  1090→        this.sorting,
+  1091→        this.background,
+  1092→    ];
+  1093→}
+  1094→
+  1095→/* --------------------- Resolved settings snapshot -------------------- */
+  1096→
+  1097→/**
+  1098→ * Plain, easy-to-consume snapshot of the formatting model. The renderer reads
+  1099→ * values from this object only — it does NOT touch the formatting-model cards
+  1100→ * directly. This keeps the renderer testable and decoupled.
+  1101→ */
+  1102→export interface ResolvedSettings {
+  1103→    bars: {
+  1104→        show: boolean;
+  1105→        barGap: number;
+  1106→        colorMode: ColorMode;
+  1107→        defaultColor: string;
+  1108→        singleColor: string;
+  1109→        gradientColorCount: number;
+  1110→        gradientColors: string[];
+  1111→        opacity: number;
+  1112→    };
+  1113→    barDataLabels: {
+  1114→        show: boolean;
+  1115→        format: DurationFormat;
+  1116→        fontFamily: string;
+  1117→        fontSize: number;
+  1118→        bold: boolean;
+  1119→        italic: boolean;
+  1120→        underline: boolean;
+  1121→        color: string;
+  1122→        position: LabelPosition;
+  1123→        showBackground: boolean;
+  1124→        backgroundColor: string;
+  1125→        backgroundTransparency: number;
+  1126→    };
+  1127→    cumulativeLine: {
+  1128→        show: boolean;
+  1129→        color: string;
+  1130→        width: number;
+  1131→        lineStyle: LineStyle;
+  1132→        showMarkers: boolean;
+  1133→        markerShape: MarkerShape;
+  1134→        markerSize: number;
+  1135→        markerColor: string;
+  1136→        showLabels: boolean;
+  1137→        labelFontFamily: string;
+  1138→        labelFontSize: number;
+  1139→        labelBold: boolean;
+  1140→        labelItalic: boolean;
+  1141→        labelUnderline: boolean;
+  1142→        labelColor: string;
+  1143→        labelDecimalPlaces: number;
+  1144→        labelShowBackground: boolean;
+  1145→        labelBackgroundColor: string;
+  1146→        labelBackgroundTransparency: number;
+  1147→    };
+  1148→    referenceLine: {
+  1149→        show: boolean;
+  1150→        value: number;
+  1151→        color: string;
+  1152→        width: number;
+  1153→        dashStyle: DashStyle;
+  1154→        labelFontFamily: string;
+  1155→        labelFontSize: number;
+  1156→        labelBold: boolean;
+  1157→    };
+  1158→    xAxis: {
+  1159→        show: boolean;
+  1160→        showLine: boolean;
+  1161→        lineColor: string;
+  1162→        lineWidth: number;
+  1163→        fontFamily: string;
+  1164→        fontSize: number;
+  1165→        bold: boolean;
+  1166→        italic: boolean;
+  1167→        underline: boolean;
+  1168→        fontColor: string;
+  1169→        textRotation: TextRotation;
+  1170→        labelDensity: LabelDensity;
+  1171→        wordWrap: boolean;
+  1172→        maxLinesMode: MaxLinesMode;
+  1173→        maxLines: number;
+  1174→    };
+  1175→    yAxis: {
+  1176→        show: boolean;
+  1177→        showLine: boolean;
+  1178→        lineColor: string;
+  1179→        lineWidth: number;
+  1180→        title: string;
+  1181→        fontFamily: string;
+  1182→        fontSize: number;
+  1183→        bold: boolean;
+  1184→        italic: boolean;
+  1185→        underline: boolean;
+  1186→        fontColor: string;
+  1187→        valueFormat: DurationFormat;
+  1188→    };
+  1189→    secondaryAxis: {
+  1190→        show: boolean;
+  1191→        showLine: boolean;
+  1192→        lineColor: string;
+  1193→        lineWidth: number;
+  1194→        min: number;
+  1195→        max: number;
+  1196→        fontFamily: string;
+  1197→        fontSize: number;
+  1198→        bold: boolean;
+  1199→        italic: boolean;
+  1200→        underline: boolean;
+  1201→        fontColor: string;
+  1202→    };
+  1203→    tooltip: { show: boolean };
+  1204→    sorting: { order: SortOrder };
+  1205→    background: { show: boolean; color: string; transparency: number };
+  1206→}
+  1207→
+  1208→export function resolveSettings(
+  1209→    model: VisualFormattingSettingsModel
+  1210→): ResolvedSettings {
+  1211→    const gradCount = readNumber(model.bars.gradientColorCount, 2);
+  1212→    const gradColors = [
+  1213→        readColor(model.bars.gradientColor1, "#1F2A5A"),
+  1214→        readColor(model.bars.gradientColor2, "#AFBDE1"),
+  1215→        readColor(model.bars.gradientColor3, "#AFBDE1"),
+  1216→        readColor(model.bars.gradientColor4, "#D4DBED"),
+  1217→        readColor(model.bars.gradientColor5, "#F0F3FA"),
+  1218→    ].slice(0, Math.max(2, Math.min(5, gradCount)));
+  1219→
+  1220→    return {
+  1221→        bars: {
+  1222→            show: readBool(model.bars.show, true),
+  1223→            barGap: readNumber(model.bars.barGap, 20),
+  1224→            colorMode: readEnumValue(model.bars.colorMode, "Gradient") as ColorMode,
+  1225→            defaultColor: readColor(model.bars.defaultColor, "#AFBDE1"),
+  1226→            singleColor: readColor(model.bars.singleColor, "#F7E6C8"),
+  1227→            gradientColorCount: gradCount,
+  1228→            gradientColors: gradColors,
+  1229→            opacity: readNumber(model.bars.opacity, 100),
+  1230→        },
+  1231→        barDataLabels: {
+  1232→            show: readBool(model.barDataLabels.show, true),
+  1233→            format: readEnumValue(
+  1234→                model.barDataLabels.format,
+  1235→                "Auto"
+  1236→            ) as DurationFormat,
+  1237→            fontFamily: readString(model.barDataLabels.fontFamily, "Segoe UI"),
+  1238→            fontSize: readNumber(model.barDataLabels.fontSize, 11),
+  1239→            bold: readBool(model.barDataLabels.bold, false),
+  1240→            italic: readBool(model.barDataLabels.italic, false),
+  1241→            underline: readBool(model.barDataLabels.underline, false),
+  1242→            color: readColor(model.barDataLabels.color, "#333333"),
+  1243→            position: readEnumValue(
+  1244→                model.barDataLabels.position,
+  1245→                "Above"
+  1246→            ) as LabelPosition,
+  1247→            showBackground: readBool(model.barDataLabels.showBackground, false),
+  1248→            backgroundColor: readColor(
+  1249→                model.barDataLabels.backgroundColor,
+  1250→                "#FFFFFF"
+  1251→            ),
+  1252→            backgroundTransparency: readNumber(
+  1253→                model.barDataLabels.backgroundTransparency,
+  1254→                0
+  1255→            ),
+  1256→        },
+  1257→        cumulativeLine: {
+  1258→            show: readBool(model.cumulativeLine.show, true),
+  1259→            color: readColor(model.cumulativeLine.color, "#1F2A5A"),
+  1260→            width: readNumber(model.cumulativeLine.width, 2),
+  1261→            lineStyle: readEnumValue(
+  1262→                model.cumulativeLine.lineStyle,
+  1263→                "Solid"
+  1264→            ) as LineStyle,
+  1265→            showMarkers: readBool(model.cumulativeLine.showMarkers, true),
+  1266→            markerShape: readEnumValue(
+  1267→                model.cumulativeLine.markerShape,
+  1268→                "Circle"
+  1269→            ) as MarkerShape,
+  1270→            markerSize: readNumber(model.cumulativeLine.markerSize, 5),
+  1271→            markerColor: readColor(model.cumulativeLine.markerColor, "#1F2A5A"),
+  1272→            showLabels: readBool(model.cumulativeLine.showLabels, true),
+  1273→            labelFontFamily: readString(
+  1274→                model.cumulativeLine.labelFontFamily,
+  1275→                "Segoe UI"
+  1276→            ),
+  1277→            labelFontSize: readNumber(model.cumulativeLine.labelFontSize, 10),
+  1278→            labelBold: readBool(model.cumulativeLine.labelBold, false),
+  1279→            labelItalic: readBool(model.cumulativeLine.labelItalic, false),
+  1280→            labelUnderline: readBool(model.cumulativeLine.labelUnderline, false),
+  1281→            labelColor: readColor(model.cumulativeLine.labelColor, "#1F2A5A"),
+  1282→            labelDecimalPlaces: readNumber(
+  1283→                model.cumulativeLine.labelDecimalPlaces,
+  1284→                1
+  1285→            ),
+  1286→            labelShowBackground: readBool(
+  1287→                model.cumulativeLine.labelShowBackground,
+  1288→                false
+  1289→            ),
+  1290→            labelBackgroundColor: readColor(
+  1291→                model.cumulativeLine.labelBackgroundColor,
+  1292→                "#FFFFFF"
+  1293→            ),
+  1294→            labelBackgroundTransparency: readNumber(
+  1295→                model.cumulativeLine.labelBackgroundTransparency,
+  1296→                0
+  1297→            ),
+  1298→        },
+  1299→        referenceLine: {
+  1300→            show: readBool(model.referenceLine.show, true),
+  1301→            value: readNumber(model.referenceLine.value, 80),
+  1302→            color: readColor(model.referenceLine.color, "#E81123"),
+  1303→            width: readNumber(model.referenceLine.width, 1.5),
+  1304→            dashStyle: readEnumValue(
+  1305→                model.referenceLine.dashStyle,
+  1306→                "Dashed"
+  1307→            ) as DashStyle,
+  1308→            labelFontFamily: readString(
+  1309→                model.referenceLine.labelFontFamily,
+  1310→                "Segoe UI"
+  1311→            ),
+  1312→            labelFontSize: readNumber(model.referenceLine.labelFontSize, 11),
+  1313→            labelBold: readBool(model.referenceLine.labelBold, true),
+  1314→        },
+  1315→        xAxis: {
+  1316→            show: readBool(model.xAxis.show, true),
+  1317→            showLine: readBool(model.xAxis.showLine, true),
+  1318→            lineColor: readColor(model.xAxis.lineColor, "#888888"),
+  1319→            lineWidth: readNumber(model.xAxis.lineWidth, 1),
+  1320→            fontFamily: readString(model.xAxis.fontFamily, "Segoe UI"),
+  1321→            fontSize: readNumber(model.xAxis.fontSize, 11),
+  1322→            bold: readBool(model.xAxis.bold, false),
+  1323→            italic: readBool(model.xAxis.italic, false),
+  1324→            underline: readBool(model.xAxis.underline, false),
+  1325→            fontColor: readColor(model.xAxis.fontColor, "#444444"),
+  1326→            textRotation: readEnumValue(
+  1327→                model.xAxis.textRotation,
+  1328→                "Rotation0"
+  1329→            ) as TextRotation,
+  1330→            labelDensity: readEnumValue(
+  1331→                model.xAxis.labelDensity,
+  1332→                "Auto"
+  1333→            ) as LabelDensity,
+  1334→            wordWrap: readBool(model.xAxis.wordWrap, true),
+  1335→            maxLinesMode: readEnumValue(
+  1336→                model.xAxis.maxLinesMode,
+  1337→                "Auto"
+  1338→            ) as MaxLinesMode,
+  1339→            maxLines: readNumber(model.xAxis.maxLines, 3),
+  1340→        },
+  1341→        yAxis: {
+  1342→            show: readBool(model.yAxis.show, true),
+  1343→            showLine: readBool(model.yAxis.showLine, true),
+  1344→            lineColor: readColor(model.yAxis.lineColor, "#CCCCCC"),
+  1345→            lineWidth: readNumber(model.yAxis.lineWidth, 1),
+  1346→            title: readString(model.yAxis.title, "Value"),
+  1347→            fontFamily: readString(model.yAxis.fontFamily, "Segoe UI"),
+  1348→            fontSize: readNumber(model.yAxis.fontSize, 11),
+  1349→            bold: readBool(model.yAxis.bold, false),
+  1350→            italic: readBool(model.yAxis.italic, false),
+  1351→            underline: readBool(model.yAxis.underline, false),
+  1352→            fontColor: readColor(model.yAxis.fontColor, "#444444"),
+  1353→            valueFormat: readEnumValue(
+  1354→                model.yAxis.valueFormat,
+  1355→                "Auto"
+  1356→            ) as DurationFormat,
+  1357→        },
+  1358→        secondaryAxis: {
+  1359→            show: readBool(model.secondaryAxis.show, true),
+  1360→            showLine: readBool(model.secondaryAxis.showLine, true),
+  1361→            lineColor: readColor(model.secondaryAxis.lineColor, "#CCCCCC"),
+  1362→            lineWidth: readNumber(model.secondaryAxis.lineWidth, 1),
+  1363→            min: readNumber(model.secondaryAxis.min, 0),
+  1364→            max: readNumber(model.secondaryAxis.max, 100),
+  1365→            fontFamily: readString(model.secondaryAxis.fontFamily, "Segoe UI"),
+  1366→            fontSize: readNumber(model.secondaryAxis.fontSize, 11),
+  1367→            bold: readBool(model.secondaryAxis.bold, false),
+  1368→            italic: readBool(model.secondaryAxis.italic, false),
+  1369→            underline: readBool(model.secondaryAxis.underline, false),
+  1370→            fontColor: readColor(model.secondaryAxis.fontColor, "#444444"),
+  1371→        },
+  1372→        tooltip: {
+  1373→            show: readBool(model.tooltip.show, true),
+  1374→        },
+  1375→        sorting: {
+  1376→            order: readEnumValue(
+  1377→                model.sorting.order,
+  1378→                "DescendingByValue"
+  1379→            ) as SortOrder,
+  1380→        },
+  1381→        background: {
+  1382→            show: readBool(model.background.show, false),
+  1383→            color: readColor(model.background.color, "#FFFFFF"),
+  1384→            transparency: readNumber(model.background.transparency, 0),
+  1385→        },
+  1386→    };
+  1387→}
+  1388→
